@@ -158,6 +158,12 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePoll handles POST /tunnel/{id}/poll.
+//
+// This endpoint now supports two modes:
+// 1. Send-only (X-Send-Only: true): Immediately sends data to ToBroker and returns 200 OK.
+//    Used by HTTPConn.Write() for immediate data transmission.
+// 2. Receive-only (X-Receive-Only: true): Long-polls FromBroker for data to send back.
+//    Used by HTTPConn.pollLoop() for continuous data reception.
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	sessionID := vars["id"]
@@ -170,6 +176,9 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 
 	session.Touch()
 
+	sendOnly := r.Header.Get("X-Send-Only") == "true"
+	receiveOnly := r.Header.Get("X-Receive-Only") == "true"
+
 	// Read request body and write to session's ToBroker pipe (if body not empty).
 	// Limit body to 1MB.
 	body := http.MaxBytesReader(w, r.Body, 1<<20)
@@ -180,6 +189,11 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(data) > 0 {
+		s.logger.Debug("poll: writing data to ToBroker",
+			zap.String("session_id", sessionID),
+			zap.Int("bytes", len(data)),
+			zap.Bool("send_only", sendOnly),
+		)
 		if _, err := session.ToBroker.Write(data); err != nil {
 			s.logger.Debug("failed to write to ToBroker pipe",
 				zap.String("session_id", sessionID),
@@ -188,10 +202,25 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Read from session's FromBroker pipe using ReadAvailable.
+	// If this is a send-only request, return immediately without waiting for data
+	if sendOnly {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Read from session's FromBroker pipe using ReadAvailable (long-polling).
+	s.logger.Debug("poll: long-polling FromBroker",
+		zap.String("session_id", sessionID),
+		zap.Bool("receive_only", receiveOnly),
+	)
+
 	buf := make([]byte, 64*1024) // 64KB read buffer
 	n, err := session.FromBroker.ReadAvailable(buf, s.config.PollTimeout)
 	if n > 0 {
+		s.logger.Debug("poll: returning data from FromBroker",
+			zap.String("session_id", sessionID),
+			zap.Int("bytes", n),
+		)
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		w.Write(buf[:n])

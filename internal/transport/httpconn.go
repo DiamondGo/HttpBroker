@@ -12,23 +12,20 @@ import (
 )
 
 // HTTPConn implements io.ReadWriteCloser over HTTP long-polling.
-// It maintains a background goroutine that continuously POSTs to the broker.
-// Each POST sends buffered write data and receives data into the read buffer.
 //
-// Write() buffers data for the next poll.
-// Read() blocks until the poll goroutine receives data.
-// Close() stops the poll goroutine and deletes the session on the broker.
+// Design:
+// 1. A dedicated long-polling connection continuously receives data from the broker
+// 2. Each Write() creates a temporary connection to send data immediately
+// 3. All responses (including acknowledgments of writes) come through the long-polling connection
+//
+// This design eliminates the need to wait for the previous poll to complete before sending new data.
 type HTTPConn struct {
 	sessionID  string
 	pollURL    string // e.g. http://broker:8080/tunnel/{id}/poll
 	deleteURL  string // e.g. http://broker:8080/tunnel/{id}
 	httpClient *http.Client
 
-	// Write-side: data buffered for next poll's request body
-	writeMu  sync.Mutex
-	writeBuf bytes.Buffer
-
-	// Read-side: data received from poll responses
+	// Read-side: data received from long-polling connection
 	readPipe *BufferedPipe
 
 	closed int32 // atomic: 0=open, 1=closed
@@ -38,7 +35,9 @@ type HTTPConn struct {
 
 // NewHTTPConn creates an HTTPConn and starts the background poll goroutine.
 // pollInterval is the minimum time to wait between polls when data is flowing.
-func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration) *HTTPConn {
+// pollTimeout is passed to the configuration but not directly used by HTTPConn
+// (the broker's ReadAvailable uses its own configured poll_timeout).
+func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval, pollTimeout time.Duration) *HTTPConn {
 	c := &HTTPConn{
 		sessionID:  sessionID,
 		pollURL:    fmt.Sprintf("%s/tunnel/%s/poll", brokerBaseURL, sessionID),
@@ -59,15 +58,42 @@ func (c *HTTPConn) Read(p []byte) (int, error) {
 	return c.readPipe.Read(p)
 }
 
-// Write buffers data to be sent in the next poll's request body.
+// Write immediately sends data to the broker via a temporary POST request.
+// It does not wait for the long-polling connection.
 func (c *HTTPConn) Write(p []byte) (int, error) {
 	if atomic.LoadInt32(&c.closed) == 1 {
 		return 0, io.ErrClosedPipe
 	}
 
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-	return c.writeBuf.Write(p)
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	// Create a temporary connection to send this data
+	req, err := http.NewRequest(http.MethodPost, c.pollURL, bytes.NewReader(p))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create send request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Send-Only", "true") // Signal to broker this is a send-only request
+
+	log.Printf("httpconn: sending %d bytes via temporary connection", len(p))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to send data: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read and discard any response body (broker should not send data back on send-only requests)
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return 0, fmt.Errorf("broker returned status %d", resp.StatusCode)
+	}
+
+	log.Printf("httpconn: successfully sent %d bytes", len(p))
+	return len(p), nil
 }
 
 // Close stops polling and sends DELETE /tunnel/{id} to the broker.
@@ -94,8 +120,8 @@ func (c *HTTPConn) Close() error {
 	return nil
 }
 
-// pollLoop continuously POSTs to the broker, sending buffered write data
-// and receiving data into the read pipe.
+// pollLoop maintains a long-polling connection to continuously receive data from the broker.
+// It does NOT send any data - all sends are done via temporary connections in Write().
 func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 	defer c.wg.Done()
 
@@ -109,34 +135,19 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 		default:
 		}
 
-		// Step 1: Collect pending write data.
-		c.writeMu.Lock()
-		var body []byte
-		if c.writeBuf.Len() > 0 {
-			body = make([]byte, c.writeBuf.Len())
-			copy(body, c.writeBuf.Bytes())
-			c.writeBuf.Reset()
-		}
-		c.writeMu.Unlock()
-
-		// Step 2: POST to pollURL with write data as body.
-		var reqBody io.Reader
-		if len(body) > 0 {
-			reqBody = bytes.NewReader(body)
-			log.Printf("httpconn: poll sending %d bytes", len(body))
-		}
-
-		req, err := http.NewRequest(http.MethodPost, c.pollURL, reqBody)
+		// Create a receive-only long-polling request (no body)
+		req, err := http.NewRequest(http.MethodPost, c.pollURL, nil)
 		if err != nil {
-			log.Printf("httpconn: failed to create request: %v", err)
+			log.Printf("httpconn: failed to create poll request: %v", err)
 			c.sleepOrStop(retryDelay)
 			continue
 		}
-		req.Header.Set("Content-Type", "application/octet-stream")
+		req.Header.Set("X-Receive-Only", "true") // Signal to broker this is receive-only
 
+		log.Printf("httpconn: starting long-poll receive")
 		resp, err := c.httpClient.Do(req)
 
-		// Step 3: Handle HTTP errors.
+		// Handle HTTP errors.
 		if err != nil {
 			if atomic.LoadInt32(&c.closed) == 1 {
 				return
@@ -146,7 +157,7 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 			continue
 		}
 
-		// Step 4: Read response body.
+		// Read response body.
 		gotData := false
 		switch resp.StatusCode {
 		case http.StatusOK:
@@ -157,7 +168,7 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 				continue
 			}
 			if len(data) > 0 {
-				log.Printf("httpconn: poll received %d bytes", len(data))
+				log.Printf("httpconn: long-poll received %d bytes", len(data))
 				gotData = true
 				if _, err := c.readPipe.Write(data); err != nil {
 					// readPipe closed, we should stop.
@@ -166,13 +177,14 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 			}
 		case http.StatusNoContent:
 			resp.Body.Close()
+			log.Printf("httpconn: long-poll timeout (no data)")
 			// No data, continue polling.
 		default:
 			resp.Body.Close()
 			log.Printf("httpconn: unexpected status %d from broker", resp.StatusCode)
 		}
 
-		// Step 5: Only sleep after idle (no data) responses.
+		// Only sleep after idle (no data) responses.
 		// After receiving data, immediately poll again to minimize latency.
 		if !gotData && pollInterval > 0 {
 			if !c.sleepOrStop(pollInterval) {

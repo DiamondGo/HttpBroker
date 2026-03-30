@@ -8,6 +8,7 @@ provider:
 
 transport:
   poll_interval: "50ms"
+  poll_timeout: "45s"
   retry_backoff: "5s"
 
 logging:

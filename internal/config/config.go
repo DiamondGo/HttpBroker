@@ -69,6 +69,7 @@ type Socks5Config struct {
 // TransportConfig holds transport timing settings.
 type TransportConfig struct {
 	PollInterval time.Duration `mapstructure:"poll_interval"`
+	PollTimeout  time.Duration `mapstructure:"poll_timeout"`
 	RetryBackoff time.Duration `mapstructure:"retry_backoff"`
 }
 

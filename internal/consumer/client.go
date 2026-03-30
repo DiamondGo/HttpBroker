@@ -20,6 +20,7 @@ type Config struct {
 	Endpoint     string
 	Socks5Listen string // e.g. ":1080"
 	PollInterval time.Duration
+	PollTimeout  time.Duration
 	RetryBackoff time.Duration
 }
 
@@ -51,6 +52,7 @@ func (c *Client) Run(ctx context.Context) error {
 		// Step 1: Connect to broker.
 		connector := &transport.HTTPConnector{
 			PollInterval: c.config.PollInterval,
+			PollTimeout:  c.config.PollTimeout,
 			HTTPClient:   &http.Client{Timeout: 0}, // no timeout for long-poll
 		}
 
