@@ -1,0 +1,14 @@
+broker:
+  url: "http://127.0.0.1:8080"
+  endpoint: "default"
+
+provider:
+  scrub_headers: true
+  dial_timeout: "10s"
+
+transport:
+  poll_interval: "50ms"
+  retry_backoff: "5s"
+
+logging:
+  level: "info"

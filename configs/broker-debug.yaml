@@ -1,0 +1,17 @@
+server:
+  listen: ":9090"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+tunnel:
+  poll_timeout: "5s"
+  session_timeout: "5m"
+
+auth:
+  enabled: false
+
+logging:
+  level: "debug"
+
