@@ -58,7 +58,7 @@ The Provider can optionally strip proxy-revealing headers (`X-Forwarded-For`, `V
 
 ### Prerequisites
 
-- **Go 1.22+** (built with Go 1.23)
+- **Go 1.25+**
 - Three machines (or three terminal windows on one machine for testing)
 
 ### Build
@@ -191,7 +191,7 @@ server:
     key_file: ""           # Path to TLS private key
 
 tunnel:
-  poll_timeout: "30s"      # How long to hold a poll request before returning empty
+  poll_timeout: "5s"       # How long to hold a poll request before returning empty
   session_timeout: "5m"    # Disconnect sessions idle longer than this
 
 auth:

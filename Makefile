@@ -42,7 +42,7 @@ test-all: test test-integration
 
 # Run speed test (requires broker, provider, and consumer to be running)
 speedtest:
-	@./test/scripts/speedtest.sh
+	@./scripts/speedtest.sh
 
 # Clean build artifacts
 clean:
