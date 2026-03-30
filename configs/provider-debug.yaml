@@ -1,0 +1,15 @@
+broker:
+  url: "http://127.0.0.1:9090"
+  endpoint: "test"
+
+provider:
+  scrub_headers: true
+  dial_timeout: "10s"
+
+transport:
+  poll_interval: "50ms"
+  retry_backoff: "5s"
+
+logging:
+  level: "debug"
+

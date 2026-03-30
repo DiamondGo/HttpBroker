@@ -1,0 +1,13 @@
+broker:
+  url: "http://127.0.0.1:8080"
+  endpoint: "default"
+
+socks5:
+  listen: ":1080"
+
+transport:
+  poll_interval: "50ms"
+  retry_backoff: "5s"
+
+logging:
+  level: "info"

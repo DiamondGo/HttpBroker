@@ -1,0 +1,14 @@
+broker:
+  url: "http://127.0.0.1:9090"
+  endpoint: "test"
+
+socks5:
+  listen: ":10800"
+
+transport:
+  poll_interval: "50ms"
+  retry_backoff: "5s"
+
+logging:
+  level: "debug"
+
