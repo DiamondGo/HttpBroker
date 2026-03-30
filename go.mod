@@ -1,6 +1,6 @@
 module github.com/kexiaowen/httpbroker
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/gorilla/mux v1.8.1
@@ -25,6 +25,7 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/sys v0.29.0 // indirect
-	golang.org/x/text v0.28.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
 )

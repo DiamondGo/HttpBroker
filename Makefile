@@ -1,4 +1,4 @@
-.PHONY: all build-broker build-consumer build-provider build-all build-pi build-pi-armv7 build-linux clean test build-release
+.PHONY: all build-broker build-consumer build-provider build-all build-pi build-pi-armv7 build-linux clean test test-integration test-all build-release speedtest
 
 # Default target
 all: build-all
@@ -29,9 +29,20 @@ build-linux:
 	GOOS=linux GOARCH=amd64 go build -o bin/httpbroker-consumer-linux-amd64 ./cmd/consumer
 	GOOS=linux GOARCH=amd64 go build -o bin/httpbroker-provider-linux-amd64 ./cmd/provider
 
-# Run tests
+# Run unit tests
 test:
 	go test ./...
+
+# Run integration tests (must be run from project root)
+test-integration: build-all
+	go test -v -timeout 5m -run TestIntegration ./test
+
+# Run all tests (unit + integration)
+test-all: test test-integration
+
+# Run speed test (requires broker, provider, and consumer to be running)
+speedtest:
+	@./test/scripts/speedtest.sh
 
 # Clean build artifacts
 clean:
