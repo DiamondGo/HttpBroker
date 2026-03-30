@@ -55,6 +55,9 @@ func main() {
 			if cfg.Transport.PollInterval == 0 {
 				cfg.Transport.PollInterval = 50 * time.Millisecond
 			}
+			if cfg.Transport.PollTimeout == 0 {
+				cfg.Transport.PollTimeout = 30 * time.Second
+			}
 			if cfg.Transport.RetryBackoff == 0 {
 				cfg.Transport.RetryBackoff = 5 * time.Second
 			}
@@ -73,6 +76,7 @@ func main() {
 				BrokerURL:    cfg.Broker.URL,
 				Endpoint:     cfg.Broker.Endpoint,
 				PollInterval: cfg.Transport.PollInterval,
+				PollTimeout:  cfg.Transport.PollTimeout,
 				RetryBackoff: cfg.Transport.RetryBackoff,
 				DialTimeout:  cfg.Provider.DialTimeout,
 				ScrubHeaders: cfg.Provider.ScrubHeaders,
