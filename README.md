@@ -1,6 +1,26 @@
 # HttpBroker
 
-A three-node proxy network that lets machines access network resources through an intermediary provider, using standard HTTP/HTTPS traffic. All tunnel traffic looks like ordinary web API calls.
+**A lightweight HTTP-based NAT traversal and intranet penetration solution** that lets machines behind firewalls, NAT, or restrictive networks access resources through an intermediary provider. Works as a reverse proxy tunnel using only standard HTTP/HTTPS traffic — no VPN client required, no firewall modifications needed.
+
+## Key Features
+
+- 🌐 **NAT Traversal / Intranet Penetration** — Access services behind NAT, firewalls, or private networks without port forwarding or VPN configuration
+- 🔒 **Firewall-Friendly** — Uses standard HTTP/HTTPS traffic that looks like ordinary web API calls — bypasses restrictive corporate proxies and firewalls
+- 🚀 **Zero Infrastructure** — No VPN server setup, no complex routing, no iptables rules — just three simple binaries
+- 🎯 **SOCKS5 Proxy** — Works with any browser or application that supports SOCKS5 (Chrome, Firefox, curl, SSH, etc.)
+- 🔀 **Reverse Proxy Tunnel** — Provider machines behind NAT can expose their network without incoming port forwarding
+- 📡 **HTTP Long-Polling Transport** — Maintains persistent tunnels using HTTP long-polling — compatible with most corporate proxy servers
+- 🔐 **Privacy-Preserving** — DNS queries are resolved on the provider side, hiding your browsing destinations from local DNS
+- 🔑 **SSH Tunnel Support** — Tunnel SSH connections through the proxy to access remote servers behind NAT/firewalls
+
+## Use Cases
+
+- **Remote Access to Private Networks** — Access internal services (databases, APIs, admin panels) running behind NAT or corporate firewalls
+- **SSH to Internal Servers** — SSH into machines behind NAT/firewalls without port forwarding or VPN setup
+- **Bypass Network Restrictions** — Route traffic through a provider in a less restrictive network location
+- **Development & Testing** — Test webhooks and external integrations against services running on your local machine
+- **IoT & Home Networks** — Access devices on home networks without exposing them directly to the internet
+- **Alternative to VPN** — Simpler setup than traditional VPN for proxy-based traffic routing
 
 ## Overview
 
@@ -53,6 +73,68 @@ The Consumer runs a local SOCKS5 server. When your browser makes a request throu
 ### Header Scrubbing
 
 The Provider can optionally strip proxy-revealing headers (`X-Forwarded-For`, `Via`, `Proxy-Authorization`, etc.) from HTTP requests before forwarding them.
+
+## NAT Traversal & Intranet Penetration
+
+HttpBroker excels at **NAT traversal** and **intranet penetration** scenarios where traditional VPN or direct connections are impractical:
+
+### How NAT Traversal Works
+
+The key insight is that **the Provider initiates all connections** to the Broker. This means:
+
+- ✅ **No incoming port forwarding required** on the Provider's network
+- ✅ **Works behind carrier-grade NAT (CGNAT)** where public IP addresses are shared
+- ✅ **Bypasses restrictive firewalls** that only allow outbound HTTP/HTTPS traffic
+- ✅ **Traverses corporate proxies** since all traffic looks like standard web API calls
+
+### Comparison with Traditional Solutions
+
+| Feature | HttpBroker | Traditional VPN | Port Forwarding | Other Tunnels |
+|---------|------------|-----------------|-----------------|---------------|
+| **NAT Traversal** | ✅ Built-in | ⚠️ Requires configuration | ❌ Needs public IP | ✅ Varies |
+| **Firewall-Friendly** | ✅ HTTP/HTTPS only | ❌ Special protocols | ❌ Incoming traffic | ⚠️ May be blocked |
+| **Setup Complexity** | ✅ Low (3 binaries) | ❌ High (server setup, certs, routing) | ⚠️ Medium (router config) | ⚠️ Varies |
+| **Corporate Proxy Compatible** | ✅ Yes | ❌ Usually blocked | ❌ N/A | ❌ Usually blocked |
+| **Works Behind CGNAT** | ✅ Yes | ⚠️ Difficult | ❌ No | ✅ Usually yes |
+| **Privacy from Local Network** | ✅ DNS on provider | ✅ Full encryption | ❌ Local DNS | ⚠️ Varies |
+
+### Real-World Scenarios
+
+**Scenario 1: Home Network Behind CGNAT**
+```
+Problem: ISP uses CGNAT, you don't have a public IP address
+Solution: Deploy Provider on home network, Broker on VPS, Consumer on laptop
+Result: Access home services (NAS, IoT devices) from anywhere
+```
+
+**Scenario 2: Restrictive Corporate Network**
+```
+Problem: Corporate firewall blocks VPN protocols, only allows HTTP/HTTPS
+Solution: Deploy Provider on personal server, Broker on cloud, Consumer on work laptop
+Result: Bypass restrictions using traffic that looks like web browsing
+```
+
+**Scenario 3: Development Testing**
+```
+Problem: Need to test webhooks against a service running on localhost
+Solution: Deploy Provider on dev machine, Broker on VPS, Consumer on test machine
+Result: External services can reach your local server via the tunnel
+```
+
+**Scenario 4: IoT Device Management**
+```
+Problem: Manage IoT devices on customer sites behind various NAT configurations
+Solution: Deploy Provider on-site, Broker on cloud, Consumer on admin workstation
+Result: Consistent management interface regardless of customer network topology
+```
+
+**Scenario 5: SSH Access to Home Server**
+```
+Problem: Need to SSH into your home server while traveling, but ISP uses CGNAT
+Solution: Deploy Provider on home server, Broker on cheap VPS, Consumer on laptop
+Result: ssh -o ProxyCommand='nc -x 127.0.0.1:1080 %h %p' user@homeserver.local
+        Access your home server from anywhere without exposing SSH port to internet
+```
 
 ## Quick Start
 
@@ -175,6 +257,68 @@ curl --socks5-hostname 127.0.0.1:1080 https://example.com
 1. Open **System Preferences** → **Network** → select your connection → **Advanced** → **Proxies**
 2. Enable **SOCKS Proxy**
 3. Set server to `127.0.0.1` and port to `1080`
+
+### SSH (Remote Server Access)
+
+You can tunnel SSH connections through the SOCKS5 proxy to access remote servers behind NAT or firewalls:
+
+**Method 1: Using ProxyCommand with netcat**
+```bash
+# One-time connection
+ssh -o ProxyCommand='nc -x 127.0.0.1:1080 %h %p' user@remote-server.internal
+
+# HTTPS connection
+ssh -o ProxyCommand='nc -X connect -x 127.0.0.1:1080 %h %p' user@remote-server.internal
+```
+
+**Method 2: Configure in ~/.ssh/config**
+```bash
+# Edit ~/.ssh/config
+Host remote-server.internal
+    ProxyCommand nc -x 127.0.0.1:1080 %h %p
+    User your-username
+
+# Or for all hosts through this proxy
+Host *.internal
+    ProxyCommand nc -x 127.0.0.1:1080 %h %p
+
+# Then simply connect
+ssh remote-server.internal
+```
+
+**Method 3: Using ssh native SOCKS support (OpenSSH 7.6+)**
+```bash
+# One-time connection
+ssh -o ProxyCommand='ssh -W %h:%p -o ProxyCommand="nc -x 127.0.0.1:1080 localhost 22" jumphost' user@remote-server
+
+# Or simpler with direct SOCKS proxy
+ssh -o ProxyCommand='socat - SOCKS4A:127.0.0.1:%h:%p,socksport=1080' user@remote-server.internal
+```
+
+**Method 4: Using ProxyJump (for multi-hop)**
+```bash
+# First configure the proxy in ~/.ssh/config
+Host proxy-tunnel
+    HostName 127.0.0.1
+    Port 1080
+    ProxyCommand nc -x 127.0.0.1:1080 %h %p
+
+Host internal-server
+    HostName remote-server.internal
+    User your-username
+    ProxyJump proxy-tunnel
+
+# Then connect
+ssh internal-server
+```
+
+**Use Cases for SSH Tunneling:**
+- Access servers behind NAT without port forwarding
+- SSH to machines on corporate networks from outside
+- Manage IoT devices or embedded systems behind firewalls
+- Access home servers when traveling
+- Connect to development machines in restricted networks
+- Bypass SSH restrictions in corporate environments
 
 ## Configuration
 
