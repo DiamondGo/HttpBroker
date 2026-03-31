@@ -19,6 +19,7 @@ func main() {
 	var brokerURL string
 	var endpoint string
 	var socks5Listen string
+	var insecureSkipVerify bool
 
 	rootCmd := &cobra.Command{
 		Use:   "httpbroker-consumer",
@@ -41,6 +42,9 @@ func main() {
 			if socks5Listen != "" {
 				cfg.Socks5.Listen = socks5Listen
 			}
+			if cmd.Flags().Changed("insecure-skip-verify") {
+				cfg.Broker.InsecureSkipVerify = insecureSkipVerify
+			}
 
 			// Apply defaults
 			if cfg.Broker.URL == "" {
@@ -54,9 +58,6 @@ func main() {
 			}
 			if cfg.Transport.PollInterval == 0 {
 				cfg.Transport.PollInterval = 50 * time.Millisecond
-			}
-			if cfg.Transport.PollTimeout == 0 {
-				cfg.Transport.PollTimeout = 30 * time.Second
 			}
 			if cfg.Transport.RetryBackoff == 0 {
 				cfg.Transport.RetryBackoff = 5 * time.Second
@@ -73,12 +74,12 @@ func main() {
 			defer stop()
 
 			client := consumer.NewClient(consumer.Config{
-				BrokerURL:    cfg.Broker.URL,
-				Endpoint:     cfg.Broker.Endpoint,
-				Socks5Listen: cfg.Socks5.Listen,
-				PollInterval: cfg.Transport.PollInterval,
-				PollTimeout:  cfg.Transport.PollTimeout,
-				RetryBackoff: cfg.Transport.RetryBackoff,
+				BrokerURL:          cfg.Broker.URL,
+				Endpoint:           cfg.Broker.Endpoint,
+				Socks5Listen:       cfg.Socks5.Listen,
+				PollInterval:       cfg.Transport.PollInterval,
+				RetryBackoff:       cfg.Transport.RetryBackoff,
+				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
 			}, logger)
 
 			logger.Info("starting consumer",
@@ -96,6 +97,8 @@ func main() {
 	rootCmd.Flags().StringVar(&endpoint, "endpoint", "", "endpoint name")
 	rootCmd.Flags().
 		StringVar(&socks5Listen, "socks5-listen", "", "SOCKS5 listen address (e.g. :1080)")
+	rootCmd.Flags().
+		BoolVar(&insecureSkipVerify, "insecure-skip-verify", false, "skip TLS certificate verification (for self-signed certs)")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

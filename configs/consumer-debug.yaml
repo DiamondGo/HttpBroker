@@ -1,13 +1,13 @@
 broker:
   url: "http://127.0.0.1:9090"
   endpoint: "test"
+  insecure_skip_verify: false
 
 socks5:
   listen: ":10800"
 
 transport:
   poll_interval: "50ms"
-  poll_timeout: "45s"
   retry_backoff: "5s"
 
 logging:
