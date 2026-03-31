@@ -81,8 +81,6 @@ func (c *HTTPConn) Write(p []byte) (int, error) {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Send-Only", "true") // Signal to broker this is a send-only request
 
-	log.Printf("httpconn: sending %d bytes via temporary connection", len(p))
-
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send data: %w", err)
@@ -95,8 +93,6 @@ func (c *HTTPConn) Write(p []byte) (int, error) {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return 0, fmt.Errorf("broker returned status %d", resp.StatusCode)
 	}
-
-	log.Printf("httpconn: successfully sent %d bytes", len(p))
 	return len(p), nil
 }
 
@@ -148,7 +144,6 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 		}
 		req.Header.Set("X-Receive-Only", "true") // Signal to broker this is receive-only
 
-		log.Printf("httpconn: starting long-poll receive")
 		resp, err := c.httpClient.Do(req)
 
 		// Handle HTTP errors.
@@ -172,7 +167,6 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 				continue
 			}
 			if len(data) > 0 {
-				log.Printf("httpconn: long-poll received %d bytes", len(data))
 				gotData = true
 				if _, err := c.readPipe.Write(data); err != nil {
 					// readPipe closed, we should stop.
@@ -181,7 +175,6 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 			}
 		case http.StatusNoContent:
 			resp.Body.Close()
-			log.Printf("httpconn: long-poll timeout (no data)")
 			// No data, continue polling.
 		case http.StatusNotFound, http.StatusUnauthorized:
 			// Session not found or unauthorized - broker likely restarted or session expired.
