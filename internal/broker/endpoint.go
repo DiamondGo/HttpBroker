@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	"github.com/hashicorp/yamux"
-	"github.com/kexiaowen/httpbroker/internal/transport"
+	"github.com/DiamondGo/HttpBroker/internal/transport"
 )
 
 // Endpoint represents a named proxy endpoint with one provider and N consumers.
