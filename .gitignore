@@ -30,3 +30,4 @@ go.work
 *.tmp
 *.log
 
+local/

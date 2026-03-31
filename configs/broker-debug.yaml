@@ -7,7 +7,7 @@ server:
 
 tunnel:
   poll_timeout: "45s"
-  session_timeout: "5m"
+  session_timeout: "60m"
 
 auth:
   enabled: false
