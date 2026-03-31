@@ -57,8 +57,9 @@ type ConsumerConfig struct {
 
 // BrokerClientConfig holds broker connection settings for clients.
 type BrokerClientConfig struct {
-	URL      string `mapstructure:"url"`
-	Endpoint string `mapstructure:"endpoint"`
+	URL                string `mapstructure:"url"`
+	Endpoint           string `mapstructure:"endpoint"`
+	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"` // Skip TLS certificate verification (for self-signed certs)
 }
 
 // Socks5Config holds SOCKS5 proxy settings.
@@ -69,7 +70,6 @@ type Socks5Config struct {
 // TransportConfig holds transport timing settings.
 type TransportConfig struct {
 	PollInterval time.Duration `mapstructure:"poll_interval"`
-	PollTimeout  time.Duration `mapstructure:"poll_timeout"`
 	RetryBackoff time.Duration `mapstructure:"retry_backoff"`
 }
 

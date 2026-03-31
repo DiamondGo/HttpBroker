@@ -6,8 +6,8 @@ server:
     key_file: ""
 
 tunnel:
-  poll_timeout: "5s"
-  session_timeout: "5m"
+  poll_timeout: "45s"
+  session_timeout: "15m"
 
 auth:
   enabled: false

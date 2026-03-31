@@ -2,6 +2,7 @@ package consumer
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -16,12 +17,12 @@ import (
 
 // Config holds consumer configuration.
 type Config struct {
-	BrokerURL    string
-	Endpoint     string
-	Socks5Listen string // e.g. ":1080"
-	PollInterval time.Duration
-	PollTimeout  time.Duration
-	RetryBackoff time.Duration
+	BrokerURL          string
+	Endpoint           string
+	Socks5Listen       string // e.g. ":1080"
+	PollInterval       time.Duration
+	RetryBackoff       time.Duration
+	InsecureSkipVerify bool // Skip TLS certificate verification
 }
 
 // Client is the consumer client.
@@ -50,10 +51,18 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		// Step 1: Connect to broker.
+		httpClient := &http.Client{Timeout: 0} // no timeout for long-poll
+		if c.config.InsecureSkipVerify {
+			httpClient.Transport = &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+			}
+		}
+
 		connector := &transport.HTTPConnector{
 			PollInterval: c.config.PollInterval,
-			PollTimeout:  c.config.PollTimeout,
-			HTTPClient:   &http.Client{Timeout: 0}, // no timeout for long-poll
+			HTTPClient:   httpClient,
 		}
 
 		c.logger.Info("connecting to broker",

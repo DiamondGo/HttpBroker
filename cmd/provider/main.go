@@ -19,6 +19,7 @@ func main() {
 	var brokerURL string
 	var endpoint string
 	var scrubHeaders bool
+	var insecureSkipVerify bool
 
 	rootCmd := &cobra.Command{
 		Use:   "httpbroker-provider",
@@ -41,6 +42,9 @@ func main() {
 			if cmd.Flags().Changed("scrub-headers") {
 				cfg.Provider.ScrubHeaders = scrubHeaders
 			}
+			if cmd.Flags().Changed("insecure-skip-verify") {
+				cfg.Broker.InsecureSkipVerify = insecureSkipVerify
+			}
 
 			// Apply defaults
 			if cfg.Broker.URL == "" {
@@ -54,9 +58,6 @@ func main() {
 			}
 			if cfg.Transport.PollInterval == 0 {
 				cfg.Transport.PollInterval = 50 * time.Millisecond
-			}
-			if cfg.Transport.PollTimeout == 0 {
-				cfg.Transport.PollTimeout = 30 * time.Second
 			}
 			if cfg.Transport.RetryBackoff == 0 {
 				cfg.Transport.RetryBackoff = 5 * time.Second
@@ -73,13 +74,13 @@ func main() {
 			defer stop()
 
 			client := provider.NewClient(provider.Config{
-				BrokerURL:    cfg.Broker.URL,
-				Endpoint:     cfg.Broker.Endpoint,
-				PollInterval: cfg.Transport.PollInterval,
-				PollTimeout:  cfg.Transport.PollTimeout,
-				RetryBackoff: cfg.Transport.RetryBackoff,
-				DialTimeout:  cfg.Provider.DialTimeout,
-				ScrubHeaders: cfg.Provider.ScrubHeaders,
+				BrokerURL:          cfg.Broker.URL,
+				Endpoint:           cfg.Broker.Endpoint,
+				PollInterval:       cfg.Transport.PollInterval,
+				RetryBackoff:       cfg.Transport.RetryBackoff,
+				DialTimeout:        cfg.Provider.DialTimeout,
+				ScrubHeaders:       cfg.Provider.ScrubHeaders,
+				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
 			}, logger)
 
 			logger.Info("starting provider",
@@ -95,6 +96,8 @@ func main() {
 	rootCmd.Flags().StringVar(&endpoint, "endpoint", "", "endpoint name")
 	rootCmd.Flags().
 		BoolVar(&scrubHeaders, "scrub-headers", false, "strip proxy headers from HTTP requests")
+	rootCmd.Flags().
+		BoolVar(&insecureSkipVerify, "insecure-skip-verify", false, "skip TLS certificate verification (for self-signed certs)")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

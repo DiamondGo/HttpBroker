@@ -23,7 +23,6 @@ type Connector interface {
 // HTTPConnector implements Connector using HTTP long-polling.
 type HTTPConnector struct {
 	PollInterval time.Duration
-	PollTimeout  time.Duration
 	HTTPClient   *http.Client
 }
 
@@ -69,6 +68,6 @@ func (c *HTTPConnector) Connect(brokerBaseURL, role, endpoint string) (io.ReadWr
 		return nil, fmt.Errorf("transport: broker returned empty session_id")
 	}
 
-	conn := NewHTTPConn(brokerBaseURL, cr.SessionID, c.PollInterval, c.PollTimeout)
+	conn := NewHTTPConn(brokerBaseURL, cr.SessionID, c.PollInterval, c.HTTPClient)
 	return conn, nil
 }

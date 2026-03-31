@@ -34,15 +34,19 @@ type HTTPConn struct {
 }
 
 // NewHTTPConn creates an HTTPConn and starts the background poll goroutine.
-// pollInterval is the minimum time to wait between polls when data is flowing.
-// pollTimeout is passed to the configuration but not directly used by HTTPConn
-// (the broker's ReadAvailable uses its own configured poll_timeout).
-func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval, pollTimeout time.Duration) *HTTPConn {
+// pollInterval is the minimum time to wait between polls when no data is available.
+// The actual long-poll timeout is controlled by the broker's poll_timeout configuration.
+// httpClient is the HTTP client to use for all requests (allows custom TLS config).
+func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration, httpClient *http.Client) *HTTPConn {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 0}
+	}
+
 	c := &HTTPConn{
 		sessionID:  sessionID,
 		pollURL:    fmt.Sprintf("%s/tunnel/%s/poll", brokerBaseURL, sessionID),
 		deleteURL:  fmt.Sprintf("%s/tunnel/%s", brokerBaseURL, sessionID),
-		httpClient: &http.Client{Timeout: 0},
+		httpClient: httpClient,
 		readPipe:   NewBufferedPipe(),
 		stopCh:     make(chan struct{}),
 	}

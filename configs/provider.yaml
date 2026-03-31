@@ -1,6 +1,7 @@
 broker:
   url: "http://127.0.0.1:8080"
   endpoint: "default"
+  insecure_skip_verify: false  # Skip TLS cert verification for self-signed certs (use only for testing)
 
 provider:
   scrub_headers: true
@@ -8,7 +9,6 @@ provider:
 
 transport:
   poll_interval: "50ms"
-  poll_timeout: "30s"
   retry_backoff: "5s"
 
 logging:
