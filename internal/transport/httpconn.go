@@ -183,6 +183,13 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 			resp.Body.Close()
 			log.Printf("httpconn: long-poll timeout (no data)")
 			// No data, continue polling.
+		case http.StatusNotFound, http.StatusUnauthorized:
+			// Session not found or unauthorized - broker likely restarted or session expired.
+			// Close the connection so that upper layers (yamux) detect the failure and reconnect.
+			resp.Body.Close()
+			log.Printf("httpconn: session invalid (status %d), closing connection to trigger reconnect", resp.StatusCode)
+			c.readPipe.Close()
+			return
 		default:
 			resp.Body.Close()
 			log.Printf("httpconn: unexpected status %d from broker", resp.StatusCode)
