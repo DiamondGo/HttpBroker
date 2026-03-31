@@ -1,4 +1,4 @@
-module github.com/kexiaowen/httpbroker/test
+module github.com/DiamondGo/HttpBroker/test
 
 go 1.25.6
 

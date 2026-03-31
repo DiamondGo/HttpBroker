@@ -12,7 +12,7 @@ import (
 	socks5 "github.com/things-go/go-socks5"
 	"go.uber.org/zap"
 
-	"github.com/kexiaowen/httpbroker/internal/transport"
+	"github.com/DiamondGo/HttpBroker/internal/transport"
 )
 
 // Config holds consumer configuration.

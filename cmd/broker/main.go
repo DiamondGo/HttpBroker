@@ -11,8 +11,8 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
-	"github.com/kexiaowen/httpbroker/internal/broker"
-	"github.com/kexiaowen/httpbroker/internal/config"
+	"github.com/DiamondGo/HttpBroker/internal/broker"
+	"github.com/DiamondGo/HttpBroker/internal/config"
 )
 
 func main() {

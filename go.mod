@@ -1,4 +1,4 @@
-module github.com/kexiaowen/httpbroker
+module github.com/DiamondGo/HttpBroker
 
 go 1.25.0
 
@@ -10,6 +10,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/things-go/go-socks5 v0.1.1
 	go.uber.org/zap v1.27.1
+	golang.org/x/net v0.52.0
 )
 
 require (
@@ -25,7 +26,6 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 )
