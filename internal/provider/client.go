@@ -51,13 +51,20 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		// Step 1: Connect to broker.
-		httpClient := &http.Client{Timeout: 0} // no timeout for long-poll
+		// Create HTTP transport with no timeouts (supports long-lived connections and large data transfers)
+		httpTransport := &http.Transport{
+			ResponseHeaderTimeout: 0, // no timeout waiting for response headers
+			IdleConnTimeout:       0, // no timeout for idle connections
+			DisableKeepAlives:     false,
+		}
 		if c.config.InsecureSkipVerify {
-			httpClient.Transport = &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
+			httpTransport.TLSClientConfig = &tls.Config{
+				InsecureSkipVerify: true,
 			}
+		}
+		httpClient := &http.Client{
+			Timeout:   0, // no timeout for long-poll
+			Transport: httpTransport,
 		}
 
 		connector := &transport.HTTPConnector{
