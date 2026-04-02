@@ -411,7 +411,8 @@ tunnel:
   session_timeout: "5m"    # Disconnect sessions idle longer than this
 
 auth:
-  enabled: false           # Authentication (placeholder for future use)
+  enabled: false           # Enable Bearer token authentication
+  token: ""                # Shared secret token (required when enabled)
 
 logging:
   level: "info"            # Log level: debug, info, warn, error
@@ -424,6 +425,7 @@ broker:
   url: "http://127.0.0.1:8080"     # Broker URL
   endpoint: "default"               # Endpoint name (must match Provider)
   insecure_skip_verify: false       # Skip TLS cert verification (use only for testing)
+  auth_token: ""                    # Authentication token (must match Broker's token)
 
 socks5:
   listen: ":1080"                   # Local SOCKS5 listen address
@@ -443,6 +445,7 @@ broker:
   url: "http://127.0.0.1:8080"     # Broker URL
   endpoint: "default"               # Endpoint name (must match Consumer)
   insecure_skip_verify: false       # Skip TLS cert verification (use only for testing)
+  auth_token: ""                    # Authentication token (must match Broker's token)
 
 provider:
   scrub_headers: true               # Strip proxy-revealing HTTP headers
@@ -559,13 +562,26 @@ For a detailed technical design, see [plans/architecture.md](plans/architecture.
 
 - **HTTP vs HTTPS**: By default, traffic between nodes uses plain HTTP. For production use, enable TLS on the Broker (`tls.enabled: true` in `broker.yaml`) or place it behind a reverse proxy with TLS termination. Without TLS, tunnel traffic is visible to network observers.
 
-- **Header Scrubbing**: The Provider can strip headers like `X-Forwarded-For`, `Via`, and `Proxy-Authorization` that reveal proxy usage. Enable with `scrub_headers: true` in the Provider config or `--scrub-headers` on the CLI.
+- **Authentication**: HttpBroker supports Bearer token authentication. When enabled, all Consumer and Provider connections must include a valid authentication token:
 
-- **Authentication**: The auth middleware is a placeholder. There is currently no authentication between nodes. Do not expose the Broker to the public internet without adding authentication or restricting access by IP.
+  ```yaml
+  # Broker config
+  auth:
+    enabled: true
+    token: "your-secret-token-here"
+
+  # Consumer/Provider config
+  broker:
+    auth_token: "your-secret-token-here"  # Must match Broker's token
+  ```
+
+  **Important**: Bearer tokens are sent in HTTP headers. If you enable authentication, you **must** also enable TLS (`tls.enabled: true`) to encrypt the token in transit. Using authentication over plain HTTP exposes your token to network observers.
+
+- **Header Scrubbing**: The Provider can strip headers like `X-Forwarded-For`, `Via`, and `Proxy-Authorization` that reveal proxy usage. Enable with `scrub_headers: true` in the Provider config or `--scrub-headers` on the CLI.
 
 - **DNS Privacy**: DNS queries are resolved on the Provider (Machine C). This means your local DNS resolver never sees the domains you visit through the tunnel, but the Provider's DNS resolver does.
 
-- **Endpoint Naming**: Anyone who knows the Broker URL and endpoint name can connect as a Consumer or Provider. Treat endpoint names as shared secrets until proper authentication is implemented.
+- **Endpoint Naming**: Endpoint names help organize multiple tunnels. When authentication is disabled, anyone who knows the Broker URL and endpoint name can connect. Enable authentication to secure your Broker.
 
 ## Raspberry Pi Deployment
 

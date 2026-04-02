@@ -1,0 +1,23 @@
+# Example Consumer configuration with authentication enabled
+# This token must match the broker's token
+
+broker:
+  url: "http://127.0.0.1:8080"
+  endpoint: "default"
+  insecure_skip_verify: false
+  auth_token: "my-secret-token-123"  # Must match broker's auth.token
+
+socks5:
+  listen: ":1080"
+
+transport:
+  poll_interval: "50ms"
+  retry_backoff: "5s"
+
+logging:
+  level: "info"
+
+# IMPORTANT: If the broker has auth enabled but uses plain HTTP (not HTTPS),
+# your token will be transmitted in clear text. Always use HTTPS when auth
+# is enabled.
+

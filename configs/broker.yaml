@@ -11,6 +11,7 @@ tunnel:
 
 auth:
   enabled: false
+  token: ""  # Set a shared secret token when auth is enabled (e.g., "my-secret-token-123")
 
 logging:
   level: "info"

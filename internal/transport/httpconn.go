@@ -24,6 +24,7 @@ type HTTPConn struct {
 	pollURL    string // e.g. http://broker:8080/tunnel/{id}/poll
 	deleteURL  string // e.g. http://broker:8080/tunnel/{id}
 	httpClient *http.Client
+	authToken  string // Optional bearer token for authentication
 
 	// Read-side: data received from long-polling connection
 	readPipe *BufferedPipe
@@ -37,7 +38,8 @@ type HTTPConn struct {
 // pollInterval is the minimum time to wait between polls when no data is available.
 // The actual long-poll timeout is controlled by the broker's poll_timeout configuration.
 // httpClient is the HTTP client to use for all requests (allows custom TLS config).
-func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration, httpClient *http.Client) *HTTPConn {
+// authToken is the optional bearer token for authentication.
+func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration, httpClient *http.Client, authToken string) *HTTPConn {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 0}
 	}
@@ -47,6 +49,7 @@ func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration, ht
 		pollURL:    fmt.Sprintf("%s/tunnel/%s/poll", brokerBaseURL, sessionID),
 		deleteURL:  fmt.Sprintf("%s/tunnel/%s", brokerBaseURL, sessionID),
 		httpClient: httpClient,
+		authToken:  authToken,
 		readPipe:   NewBufferedPipe(),
 		stopCh:     make(chan struct{}),
 	}
@@ -81,6 +84,11 @@ func (c *HTTPConn) Write(p []byte) (int, error) {
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Send-Only", "true") // Signal to broker this is a send-only request
 
+	// Add authentication token if configured
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to send data: %w", err)
@@ -111,6 +119,10 @@ func (c *HTTPConn) Close() error {
 	// Send DELETE to broker to clean up the session.
 	req, err := http.NewRequest(http.MethodDelete, c.deleteURL, nil)
 	if err == nil {
+		// Add authentication token if configured
+		if c.authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+c.authToken)
+		}
 		resp, err := c.httpClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
@@ -143,6 +155,11 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 			continue
 		}
 		req.Header.Set("X-Receive-Only", "true") // Signal to broker this is receive-only
+
+		// Add authentication token if configured
+		if c.authToken != "" {
+			req.Header.Set("Authorization", "Bearer "+c.authToken)
+		}
 
 		resp, err := c.httpClient.Do(req)
 

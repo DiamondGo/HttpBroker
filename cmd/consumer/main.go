@@ -80,6 +80,7 @@ func main() {
 				PollInterval:       cfg.Transport.PollInterval,
 				RetryBackoff:       cfg.Transport.RetryBackoff,
 				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
+				AuthToken:          cfg.Broker.AuthToken,
 			}, logger)
 
 			logger.Info("starting consumer",

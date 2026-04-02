@@ -411,7 +411,8 @@ tunnel:
   session_timeout: "5m"    # 断开空闲时间超过此值的会话
 
 auth:
-  enabled: false           # 身份验证（预留供未来使用）
+  enabled: false           # 启用 Bearer Token 身份验证
+  token: ""                # 共享密钥令牌（启用时必需）
 
 logging:
   level: "info"            # 日志级别：debug、info、warn、error
@@ -424,6 +425,7 @@ broker:
   url: "http://127.0.0.1:8080"     # Broker URL
   endpoint: "default"               # 端点名称（必须与 Provider 匹配）
   insecure_skip_verify: false       # 跳过 TLS 证书验证（仅用于测试）
+  auth_token: ""                    # 身份验证令牌（必须与 Broker 的令牌匹配）
 
 socks5:
   listen: ":1080"                   # 本地 SOCKS5 监听地址
@@ -443,6 +445,7 @@ broker:
   url: "http://127.0.0.1:8080"     # Broker URL
   endpoint: "default"               # 端点名称（必须与 Consumer 匹配）
   insecure_skip_verify: false       # 跳过 TLS 证书验证（仅用于测试）
+  auth_token: ""                    # 身份验证令牌（必须与 Broker 的令牌匹配）
 
 provider:
   scrub_headers: true               # 清除显示代理的 HTTP 请求头
@@ -559,13 +562,26 @@ plans/          → 架构文档
 
 - **HTTP vs HTTPS**：默认情况下，节点之间的流量使用纯 HTTP。对于生产使用，在 Broker 上启用 TLS（在 `broker.yaml` 中设置 `tls.enabled: true`）或将其放在带 TLS 终止的反向代理后面。没有 TLS，隧道流量对网络观察者是可见的。
 
-- **请求头清理**：Provider 可以去除显示代理使用的请求头，如 `X-Forwarded-For`、`Via` 和 `Proxy-Authorization`。在 Provider 配置中使用 `scrub_headers: true` 或在 CLI 上使用 `--scrub-headers` 启用。
+- **身份验证**：HttpBroker 支持 Bearer Token 身份验证。启用后，所有 Consumer 和 Provider 连接都必须包含有效的身份验证令牌：
 
-- **身份验证**：auth 中间件是一个占位符。目前节点之间没有身份验证。在没有添加身份验证或通过 IP 限制访问的情况下，不要将 Broker 暴露到公共互联网。
+  ```yaml
+  # Broker 配置
+  auth:
+    enabled: true
+    token: "your-secret-token-here"
+
+  # Consumer/Provider 配置
+  broker:
+    auth_token: "your-secret-token-here"  # 必须与 Broker 的令牌匹配
+  ```
+
+  **重要提示**：Bearer Token 通过 HTTP 请求头发送。如果启用身份验证，你**必须**同时启用 TLS（`tls.enabled: true`）以加密传输中的令牌。在纯 HTTP 上使用身份验证会将你的令牌暴露给网络观察者。
+
+- **请求头清理**：Provider 可以去除显示代理使用的请求头，如 `X-Forwarded-For`、`Via` 和 `Proxy-Authorization`。在 Provider 配置中使用 `scrub_headers: true` 或在 CLI 上使用 `--scrub-headers` 启用。
 
 - **DNS 隐私**：DNS 查询在 Provider（机器 C）上解析。这意味着你的本地 DNS 解析器永远看不到你通过隧道访问的域名，但 Provider 的 DNS 解析器可以看到。
 
-- **端点命名**：任何知道 Broker URL 和端点名称的人都可以作为 Consumer 或 Provider 连接。在实现适当的身份验证之前，将端点名称视为共享密钥。
+- **端点命名**：端点名称有助于组织多个隧道。当身份验证被禁用时，任何知道 Broker URL 和端点名称的人都可以连接。启用身份验证以保护你的 Broker。
 
 ## 树莓派部署
 

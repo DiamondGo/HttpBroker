@@ -1,0 +1,32 @@
+# Example Broker configuration with authentication enabled
+# This is a demonstration of how to enable Bearer Token authentication
+
+server:
+  listen: ":8080"
+  tls:
+    enabled: false         # IMPORTANT: Set to true in production when using auth
+    cert_file: ""          # Path to TLS certificate
+    key_file: ""           # Path to TLS private key
+
+tunnel:
+  poll_timeout: "45s"
+  session_timeout: "15m"
+
+auth:
+  enabled: true
+  token: "my-secret-token-123"  # Change this to a strong random token
+
+logging:
+  level: "info"
+
+# SECURITY NOTICE:
+# When auth.enabled is true, you MUST also enable TLS (tls.enabled: true) to
+# encrypt the token in transit. Using authentication over plain HTTP exposes
+# your token to network observers.
+#
+# Generate a strong token with:
+#   openssl rand -base64 32
+#
+# Or in Python:
+#   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+

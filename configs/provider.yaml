@@ -2,6 +2,7 @@ broker:
   url: "http://127.0.0.1:8080"
   endpoint: "default"
   insecure_skip_verify: false  # Skip TLS cert verification for self-signed certs (use only for testing)
+  auth_token: ""               # Authentication token (must match broker's token if auth is enabled)
 
 provider:
   scrub_headers: true
