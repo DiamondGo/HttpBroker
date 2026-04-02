@@ -75,6 +75,8 @@ func main() {
 				TLSKeyFile:     cfg.Server.TLS.KeyFile,
 				PollTimeout:    cfg.Tunnel.PollTimeout,
 				SessionTimeout: cfg.Tunnel.SessionTimeout,
+				AuthEnabled:    cfg.Auth.Enabled,
+				AuthToken:      cfg.Auth.Token,
 			}
 
 			// Create and start server

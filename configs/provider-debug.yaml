@@ -1,6 +1,7 @@
 broker:
   url: "http://127.0.0.1:9090"
   endpoint: "test"
+  auth_token: ""               # Authentication token (must match broker's token if auth is enabled)
 
 provider:
   scrub_headers: true

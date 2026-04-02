@@ -2,6 +2,7 @@ broker:
   url: "http://127.0.0.1:9090"
   endpoint: "test"
   insecure_skip_verify: false
+  auth_token: ""               # Authentication token (must match broker's token if auth is enabled)
 
 socks5:
   listen: ":10800"

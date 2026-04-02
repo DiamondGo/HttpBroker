@@ -22,7 +22,8 @@ type Config struct {
 	Socks5Listen       string // e.g. ":1080"
 	PollInterval       time.Duration
 	RetryBackoff       time.Duration
-	InsecureSkipVerify bool // Skip TLS certificate verification
+	InsecureSkipVerify bool   // Skip TLS certificate verification
+	AuthToken          string // Authentication token for broker
 }
 
 // Client is the consumer client.
@@ -70,6 +71,7 @@ func (c *Client) Run(ctx context.Context) error {
 		connector := &transport.HTTPConnector{
 			PollInterval: c.config.PollInterval,
 			HTTPClient:   httpClient,
+			AuthToken:    c.config.AuthToken,
 		}
 
 		c.logger.Info("connecting to broker",

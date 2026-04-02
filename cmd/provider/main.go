@@ -81,6 +81,7 @@ func main() {
 				DialTimeout:        cfg.Provider.DialTimeout,
 				ScrubHeaders:       cfg.Provider.ScrubHeaders,
 				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
+				AuthToken:          cfg.Broker.AuthToken,
 			}, logger)
 
 			logger.Info("starting provider",

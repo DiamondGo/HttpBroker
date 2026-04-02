@@ -24,6 +24,7 @@ type Connector interface {
 type HTTPConnector struct {
 	PollInterval time.Duration
 	HTTPClient   *http.Client
+	AuthToken    string // Optional bearer token for authentication
 }
 
 // connectResponse is the JSON response from POST /tunnel/connect.
@@ -44,7 +45,18 @@ func (c *HTTPConnector) Connect(brokerBaseURL, role, endpoint string) (io.ReadWr
 	params.Set("endpoint", endpoint)
 	connectURL := brokerBaseURL + "/tunnel/connect?" + params.Encode()
 
-	resp, err := client.Post(connectURL, "application/json", nil)
+	req, err := http.NewRequest(http.MethodPost, connectURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("transport: failed to create connect request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Add authentication token if configured
+	if c.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.AuthToken)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("transport: failed to connect to broker: %w", err)
 	}
@@ -68,6 +80,6 @@ func (c *HTTPConnector) Connect(brokerBaseURL, role, endpoint string) (io.ReadWr
 		return nil, fmt.Errorf("transport: broker returned empty session_id")
 	}
 
-	conn := NewHTTPConn(brokerBaseURL, cr.SessionID, c.PollInterval, c.HTTPClient)
+	conn := NewHTTPConn(brokerBaseURL, cr.SessionID, c.PollInterval, c.HTTPClient, c.AuthToken)
 	return conn, nil
 }

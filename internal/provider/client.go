@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/hashicorp/yamux"
 	"github.com/DiamondGo/HttpBroker/internal/transport"
+	"github.com/hashicorp/yamux"
 	"go.uber.org/zap"
 )
 
@@ -20,7 +20,8 @@ type Config struct {
 	RetryBackoff       time.Duration
 	DialTimeout        time.Duration
 	ScrubHeaders       bool
-	InsecureSkipVerify bool // Skip TLS certificate verification
+	InsecureSkipVerify bool   // Skip TLS certificate verification
+	AuthToken          string // Authentication token for broker
 }
 
 // Client is the provider client.
@@ -70,6 +71,7 @@ func (c *Client) Run(ctx context.Context) error {
 		connector := &transport.HTTPConnector{
 			PollInterval: c.config.PollInterval,
 			HTTPClient:   httpClient,
+			AuthToken:    c.config.AuthToken,
 		}
 
 		c.logger.Info("connecting to broker",

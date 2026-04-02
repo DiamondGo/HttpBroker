@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gorilla/mux"
 	"github.com/DiamondGo/HttpBroker/internal/transport"
+	"github.com/gorilla/mux"
 	"go.uber.org/zap"
 )
 
@@ -22,6 +22,8 @@ type Config struct {
 	UseTLS         bool
 	PollTimeout    time.Duration // how long to hold poll before empty response (default 30s)
 	SessionTimeout time.Duration // inactive session cleanup interval (default 5m)
+	AuthEnabled    bool          // whether authentication is enabled
+	AuthToken      string        // authentication token (used when AuthEnabled is true)
 }
 
 // Server is the broker HTTP server.
@@ -55,7 +57,21 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 	}
 
 	router := mux.NewRouter()
-	auth := &NoopAuthenticator{}
+
+	// Choose authenticator based on configuration
+	var auth Authenticator
+	if config.AuthEnabled {
+		if config.AuthToken == "" {
+			logger.Warn("auth enabled but no token configured, using noop authenticator")
+			auth = &NoopAuthenticator{}
+		} else {
+			auth = NewTokenAuthenticator(config.AuthToken)
+			logger.Info("token authentication enabled")
+		}
+	} else {
+		auth = &NoopAuthenticator{}
+		logger.Info("authentication disabled")
+	}
 
 	router.Handle("/tunnel/connect", AuthMiddleware(auth, http.HandlerFunc(s.handleConnect))).
 		Methods("POST")

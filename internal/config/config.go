@@ -60,6 +60,7 @@ type BrokerClientConfig struct {
 	URL                string `mapstructure:"url"`
 	Endpoint           string `mapstructure:"endpoint"`
 	InsecureSkipVerify bool   `mapstructure:"insecure_skip_verify"` // Skip TLS certificate verification (for self-signed certs)
+	AuthToken          string `mapstructure:"auth_token"`           // Authentication token for broker
 }
 
 // Socks5Config holds SOCKS5 proxy settings.
