@@ -185,6 +185,78 @@ broker 默认监听 `:8080` 并等待 Consumer 和 Provider 连接。
 curl http://BROKER_IP:8080/status
 ```
 
+#### 为 HTTPS 生成自签名证书
+
+要在 Broker 上启用 TLS/HTTPS，你需要证书和私钥文件。对于测试或内部使用，可以使用 OpenSSL 生成自签名证书：
+
+```bash
+# 生成有效期为 365 天的自签名证书
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes \
+  -subj "/C=CN/ST=Province/L=City/O=Organization/CN=your-broker-hostname"
+
+# 如果需要指定 IP 地址或多个主机名，使用 SAN（主题备用名称）
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes \
+  -subj "/C=CN/ST=Province/L=City/O=Organization/CN=your-broker-hostname" \
+  -addext "subjectAltName=DNS:your-broker-hostname,DNS:localhost,IP:192.168.1.100"
+```
+
+将 `your-broker-hostname` 替换为你的 broker 主机名或域名，将 `192.168.1.100` 替换为你的 broker IP 地址。
+
+**使用 TLS 启动 Broker：**
+
+```bash
+# 使用 CLI 标志
+./bin/httpbroker-broker --listen :8443 --tls-cert server.crt --tls-key server.key
+
+# 或更新 configs/broker.yaml：
+# server:
+#   listen: ":8443"
+#   tls:
+#     enabled: true
+#     cert_file: "server.crt"
+#     key_file: "server.key"
+./bin/httpbroker-broker --config configs/broker.yaml
+```
+
+**更新 Consumer 和 Provider 使用 HTTPS：**
+
+使用自签名证书时，你有两个选择：
+
+**选项 1：跳过证书验证（仅用于测试）：**
+
+```bash
+# Consumer - 使用 CLI 标志
+./bin/httpbroker-consumer --broker-url https://BROKER_IP:8443 --endpoint vpn1 --socks5-listen :1080 --insecure-skip-verify
+
+# Provider - 使用 CLI 标志
+./bin/httpbroker-provider --broker-url https://BROKER_IP:8443 --endpoint vpn1 --insecure-skip-verify
+
+# 或更新 configs/consumer.yaml 和 configs/provider.yaml：
+# broker:
+#   url: "https://BROKER_IP:8443"
+#   endpoint: "vpn1"
+#   insecure_skip_verify: true  # 跳过 TLS 证书验证
+```
+
+使用 `insecure_skip_verify: true` 时，证书的 CN（通用名称）和其他字段不需要与实际的主机名或 IP 地址匹配。
+
+**选项 2：使用正确配置的证书（用于生产环境）：**
+
+生成具有匹配 CN/SAN 的证书，并在不跳过验证的情况下使用：
+
+```bash
+# Consumer
+./bin/httpbroker-consumer --broker-url https://BROKER_IP:8443 --endpoint vpn1 --socks5-listen :1080
+
+# Provider
+./bin/httpbroker-provider --broker-url https://BROKER_IP:8443 --endpoint vpn1
+```
+
+**安全提示：** `insecure_skip_verify` 会禁用所有 TLS 证书验证，**仅应用于测试环境**。对于生产环境，应该：
+- 使用来自可信证书颁发机构（CA）的证书，如 Let's Encrypt
+- 生成具有正确配置的 CN/SAN 字段的证书，使其与 broker 的主机名/IP 匹配
+- 将自签名 CA 证书导入系统的信任存储
+
 ### 机器 B — 启动 Consumer
 
 ```bash
@@ -349,37 +421,39 @@ logging:
 
 ```yaml
 broker:
-  url: "http://127.0.0.1:8080"   # Broker URL
-  endpoint: "default"             # 端点名称（必须与 Provider 匹配）
+  url: "http://127.0.0.1:8080"     # Broker URL
+  endpoint: "default"               # 端点名称（必须与 Provider 匹配）
+  insecure_skip_verify: false       # 跳过 TLS 证书验证（仅用于测试）
 
 socks5:
-  listen: ":1080"                 # 本地 SOCKS5 监听地址
+  listen: ":1080"                   # 本地 SOCKS5 监听地址
 
 transport:
-  poll_interval: "50ms"           # 轮询请求之间的延迟
-  retry_backoff: "5s"             # 出错时重新连接前的等待时间
+  poll_interval: "50ms"             # 轮询请求之间的延迟
+  retry_backoff: "5s"               # 出错时重新连接前的等待时间
 
 logging:
-  level: "info"                   # 日志级别：debug、info、warn、error
+  level: "info"                     # 日志级别：debug、info、warn、error
 ```
 
 ### Provider（`configs/provider.yaml`）
 
 ```yaml
 broker:
-  url: "http://127.0.0.1:8080"   # Broker URL
-  endpoint: "default"             # 端点名称（必须与 Consumer 匹配）
+  url: "http://127.0.0.1:8080"     # Broker URL
+  endpoint: "default"               # 端点名称（必须与 Consumer 匹配）
+  insecure_skip_verify: false       # 跳过 TLS 证书验证（仅用于测试）
 
 provider:
-  scrub_headers: true             # 清除显示代理的 HTTP 请求头
-  dial_timeout: "10s"             # 拨号目标主机时的超时
+  scrub_headers: true               # 清除显示代理的 HTTP 请求头
+  dial_timeout: "10s"               # 拨号目标主机时的超时
 
 transport:
-  poll_interval: "50ms"           # 轮询请求之间的延迟
-  retry_backoff: "5s"             # 出错时重新连接前的等待时间
+  poll_interval: "50ms"             # 轮询请求之间的延迟
+  retry_backoff: "5s"               # 出错时重新连接前的等待时间
 
 logging:
-  level: "info"                   # 日志级别：debug、info、warn、error
+  level: "info"                     # 日志级别：debug、info、warn、error
 ```
 
 ### 多个端点
