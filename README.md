@@ -185,6 +185,78 @@ The broker listens on `:8080` by default and waits for Consumer and Provider con
 curl http://BROKER_IP:8080/status
 ```
 
+#### Generating Self-Signed Certificates for HTTPS
+
+To enable TLS/HTTPS on the Broker, you need a certificate and private key. For testing or internal use, you can generate a self-signed certificate using OpenSSL:
+
+```bash
+# Generate a self-signed certificate valid for 365 days
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes \
+  -subj "/C=US/ST=State/L=City/O=Organization/CN=your-broker-hostname"
+
+# If you need to specify IP address or multiple hostnames, use SAN (Subject Alternative Name)
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes \
+  -subj "/C=US/ST=State/L=City/O=Organization/CN=your-broker-hostname" \
+  -addext "subjectAltName=DNS:your-broker-hostname,DNS:localhost,IP:192.168.1.100"
+```
+
+Replace `your-broker-hostname` with your broker's hostname or domain name, and `192.168.1.100` with your broker's IP address.
+
+**Start the Broker with TLS:**
+
+```bash
+# Using CLI flags
+./bin/httpbroker-broker --listen :8443 --tls-cert server.crt --tls-key server.key
+
+# Or update configs/broker.yaml:
+# server:
+#   listen: ":8443"
+#   tls:
+#     enabled: true
+#     cert_file: "server.crt"
+#     key_file: "server.key"
+./bin/httpbroker-broker --config configs/broker.yaml
+```
+
+**Update Consumer and Provider to use HTTPS:**
+
+When using self-signed certificates, you have two options:
+
+**Option 1: Skip certificate verification (for testing only):**
+
+```bash
+# Consumer - using CLI flag
+./bin/httpbroker-consumer --broker-url https://BROKER_IP:8443 --endpoint vpn1 --socks5-listen :1080 --insecure-skip-verify
+
+# Provider - using CLI flag
+./bin/httpbroker-provider --broker-url https://BROKER_IP:8443 --endpoint vpn1 --insecure-skip-verify
+
+# Or update configs/consumer.yaml and configs/provider.yaml:
+# broker:
+#   url: "https://BROKER_IP:8443"
+#   endpoint: "vpn1"
+#   insecure_skip_verify: true  # Skip TLS cert verification
+```
+
+With `insecure_skip_verify: true`, the certificate's CN (Common Name) and other fields don't need to match the actual hostname or IP address.
+
+**Option 2: Use properly configured certificates (for production):**
+
+Generate certificates with matching CN/SAN and use them without skipping verification:
+
+```bash
+# Consumer
+./bin/httpbroker-consumer --broker-url https://BROKER_IP:8443 --endpoint vpn1 --socks5-listen :1080
+
+# Provider
+./bin/httpbroker-provider --broker-url https://BROKER_IP:8443 --endpoint vpn1
+```
+
+**Security Note:** `insecure_skip_verify` disables all TLS certificate verification and should **only be used for testing**. For production use, either:
+- Use certificates from a trusted Certificate Authority (CA) like Let's Encrypt
+- Generate certificates with properly configured CN/SAN fields that match your broker's hostname/IP
+- Import your self-signed CA certificate into the system's trust store
+
 ### Machine B — Start the Consumer
 
 ```bash
@@ -349,37 +421,39 @@ logging:
 
 ```yaml
 broker:
-  url: "http://127.0.0.1:8080"   # Broker URL
-  endpoint: "default"             # Endpoint name (must match Provider)
+  url: "http://127.0.0.1:8080"     # Broker URL
+  endpoint: "default"               # Endpoint name (must match Provider)
+  insecure_skip_verify: false       # Skip TLS cert verification (use only for testing)
 
 socks5:
-  listen: ":1080"                 # Local SOCKS5 listen address
+  listen: ":1080"                   # Local SOCKS5 listen address
 
 transport:
-  poll_interval: "50ms"           # Delay between poll requests
-  retry_backoff: "5s"             # Wait time before reconnecting on error
+  poll_interval: "50ms"             # Delay between poll requests
+  retry_backoff: "5s"               # Wait time before reconnecting on error
 
 logging:
-  level: "info"                   # Log level: debug, info, warn, error
+  level: "info"                     # Log level: debug, info, warn, error
 ```
 
 ### Provider (`configs/provider.yaml`)
 
 ```yaml
 broker:
-  url: "http://127.0.0.1:8080"   # Broker URL
-  endpoint: "default"             # Endpoint name (must match Consumer)
+  url: "http://127.0.0.1:8080"     # Broker URL
+  endpoint: "default"               # Endpoint name (must match Consumer)
+  insecure_skip_verify: false       # Skip TLS cert verification (use only for testing)
 
 provider:
-  scrub_headers: true             # Strip proxy-revealing HTTP headers
-  dial_timeout: "10s"             # Timeout when dialing target hosts
+  scrub_headers: true               # Strip proxy-revealing HTTP headers
+  dial_timeout: "10s"               # Timeout when dialing target hosts
 
 transport:
-  poll_interval: "50ms"           # Delay between poll requests
-  retry_backoff: "5s"             # Wait time before reconnecting on error
+  poll_interval: "50ms"             # Delay between poll requests
+  retry_backoff: "5s"               # Wait time before reconnecting on error
 
 logging:
-  level: "info"                   # Log level: debug, info, warn, error
+  level: "info"                     # Log level: debug, info, warn, error
 ```
 
 ### Multiple Endpoints
