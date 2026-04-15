@@ -4,8 +4,8 @@ import (
 	"io"
 	"net"
 
-	"github.com/hashicorp/yamux"
 	"github.com/DiamondGo/HttpBroker/internal/transport"
+	"github.com/hashicorp/yamux"
 	"go.uber.org/zap"
 )
 
@@ -24,11 +24,14 @@ func NewRelay(registry *EndpointRegistry, logger *zap.Logger) *Relay {
 }
 
 // HandleProvider sets up yamux on the provider session and registers it.
-// Blocks until the provider disconnects.
+// Blocks until the provider disconnects, then closes all consumer yamux sessions
+// for this endpoint so consumers detect the failure immediately.
 func (r *Relay) HandleProvider(session *transport.Session) {
-	r.logger.Info("provider connecting",
+	consumerCount := r.registry.ConsumerCount(session.Endpoint)
+	r.logger.Info("provider connected",
 		zap.String("session_id", session.ID),
 		zap.String("endpoint", session.Endpoint),
+		zap.Int("active_consumers", consumerCount),
 	)
 
 	// Provider connection: broker is yamux client (opens streams TO provider).
@@ -48,8 +51,11 @@ func (r *Relay) HandleProvider(session *transport.Session) {
 	}
 	defer func() {
 		yamuxSess.Close()
+		// RemoveProvider closes all consumer yamux sessions for this endpoint,
+		// causing each consumer to detect the disconnection and re-register.
+		// It also unblocks any bridgeStream goroutines waiting in WaitForProvider.
 		r.registry.RemoveProvider(session.Endpoint)
-		r.logger.Info("provider disconnected",
+		r.logger.Info("provider disconnected — notified all consumers to reconnect",
 			zap.String("session_id", session.ID),
 			zap.String("endpoint", session.Endpoint),
 		)
@@ -65,18 +71,28 @@ func (r *Relay) HandleProvider(session *transport.Session) {
 		return
 	}
 
+	// Notify any bridgeStream goroutines waiting for a provider to arrive.
+	r.registry.NotifyProviderArrived(session.Endpoint)
+
 	// Block until the yamux session closes (provider disconnects).
-	// We do this by waiting for the session to signal closure.
 	<-yamuxSess.CloseChan()
 }
 
 // HandleConsumer sets up yamux on the consumer session and starts accepting streams.
 // Blocks until the consumer disconnects.
 func (r *Relay) HandleConsumer(session *transport.Session) {
-	r.logger.Info("consumer connecting",
+	hasProvider := r.registry.HasProvider(session.Endpoint)
+	r.logger.Info("consumer connected",
 		zap.String("session_id", session.ID),
 		zap.String("endpoint", session.Endpoint),
+		zap.Bool("provider_available", hasProvider),
 	)
+	if !hasProvider {
+		r.logger.Warn(
+			"consumer connected but no provider is available yet — streams will wait indefinitely for provider",
+			zap.String("endpoint", session.Endpoint),
+		)
+	}
 
 	// Consumer connection: broker is yamux server (accepts streams FROM consumer).
 	// Disable keepalives for the same reason as the provider session above.
@@ -92,14 +108,23 @@ func (r *Relay) HandleConsumer(session *transport.Session) {
 		)
 		return
 	}
-	r.logger.Debug("yamux server session created for consumer")
+
+	// Register the consumer yamux session so it can be closed when the provider
+	// disconnects, allowing the consumer to detect the failure immediately.
+	r.registry.RegisterConsumerYamux(session.Endpoint, session.ID, yamuxSess)
+
 	defer func() {
 		yamuxSess.Close()
+		r.registry.UnregisterConsumerYamux(session.Endpoint, session.ID)
 		r.logger.Info("consumer disconnected",
 			zap.String("session_id", session.ID),
 			zap.String("endpoint", session.Endpoint),
 		)
 	}()
+
+	// sessionDone is closed when this consumer's yamux session ends.
+	// Passed to bridgeStream so WaitForProvider can abort if the consumer leaves.
+	sessionDone := yamuxSess.CloseChan()
 
 	// Accept streams from the consumer and bridge them to the provider.
 	for {
@@ -115,18 +140,25 @@ func (r *Relay) HandleConsumer(session *transport.Session) {
 			return
 		}
 
-		r.logger.Debug("consumer stream accepted")
-		go r.bridgeStream(stream, session.Endpoint)
+		r.logger.Debug("consumer stream accepted, bridging to provider")
+		go r.bridgeStream(stream, session.Endpoint, sessionDone)
 	}
 }
 
 // bridgeStream handles a single consumer yamux stream:
-// 1. Read target address from stream (format: 1 byte length + host:port string)
-// 2. Find provider yamux session for the endpoint
-// 3. Open a new yamux stream to the provider
-// 4. Write target address to the provider stream
-// 5. Bridge with bidirectional io.Copy
-func (r *Relay) bridgeStream(consumerStream net.Conn, endpointName string) {
+//  1. Read target address from stream (format: 1 byte length + host:port string)
+//  2. Wait for a provider yamux session — indefinitely, but cancels if the
+//     consumer yamux session closes (sessionDone fires). This handles the
+//     "consumer connects before provider" case: the browser request is held
+//     until the provider arrives, rather than failing immediately.
+//  3. Open a new yamux stream to the provider
+//  4. Write target address to the provider stream
+//  5. Bridge with bidirectional io.Copy
+func (r *Relay) bridgeStream(
+	consumerStream net.Conn,
+	endpointName string,
+	sessionDone <-chan struct{},
+) {
 	defer consumerStream.Close()
 
 	// Step 1: Read target address from consumer stream.
@@ -155,10 +187,13 @@ func (r *Relay) bridgeStream(consumerStream net.Conn, endpointName string) {
 		zap.String("target", targetAddr),
 	)
 
-	// Step 2: Find provider yamux session.
-	providerYamux, ok := r.registry.GetProviderYamux(endpointName)
+	// Step 2: Wait for a provider yamux session.
+	// WaitForProvider blocks until a provider registers or sessionDone fires.
+	// If the consumer disconnects (or the broker closes the consumer's yamux
+	// session because the provider left), sessionDone fires and we abort.
+	providerYamux, ok := r.registry.WaitForProvider(endpointName, sessionDone)
 	if !ok {
-		r.logger.Error("no provider available for endpoint",
+		r.logger.Debug("consumer session ended while waiting for provider — stream dropped",
 			zap.String("endpoint", endpointName),
 			zap.String("target", targetAddr),
 		)

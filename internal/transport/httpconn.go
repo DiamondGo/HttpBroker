@@ -14,11 +14,16 @@ import (
 // HTTPConn implements io.ReadWriteCloser over HTTP long-polling.
 //
 // Design:
-// 1. A dedicated long-polling connection continuously receives data from the broker
-// 2. Each Write() creates a temporary connection to send data immediately
-// 3. All responses (including acknowledgments of writes) come through the long-polling connection
+// 1. A dedicated long-polling connection continuously receives data from the broker.
+// 2. Each Write() creates a temporary connection to send data immediately.
+// 3. All responses (including acknowledgments of writes) come through the long-polling connection.
 //
 // This design eliminates the need to wait for the previous poll to complete before sending new data.
+//
+// Transport failure detection:
+// When the poll loop encounters a fatal error (broker gone, session invalid), it closes
+// the readPipe AND signals the transportFailedCh channel. Callers can select on
+// TransportFailed() to distinguish a broker-level failure from a yamux-level close.
 type HTTPConn struct {
 	sessionID  string
 	pollURL    string // e.g. http://broker:8080/tunnel/{id}/poll
@@ -28,6 +33,13 @@ type HTTPConn struct {
 
 	// Read-side: data received from long-polling connection
 	readPipe *BufferedPipe
+
+	// transportFailedCh is closed when the HTTP transport itself fails
+	// (network error, 404, 401). This lets callers distinguish a broker-level
+	// failure from a yamux session close caused by the remote peer (e.g. the
+	// broker closing the consumer's yamux session because the provider left).
+	transportFailedCh chan struct{}
+	transportFailOnce sync.Once
 
 	closed int32 // atomic: 0=open, 1=closed
 	stopCh chan struct{}
@@ -45,19 +57,38 @@ func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration, ht
 	}
 
 	c := &HTTPConn{
-		sessionID:  sessionID,
-		pollURL:    fmt.Sprintf("%s/tunnel/%s/poll", brokerBaseURL, sessionID),
-		deleteURL:  fmt.Sprintf("%s/tunnel/%s", brokerBaseURL, sessionID),
-		httpClient: httpClient,
-		authToken:  authToken,
-		readPipe:   NewBufferedPipe(),
-		stopCh:     make(chan struct{}),
+		sessionID:         sessionID,
+		pollURL:           fmt.Sprintf("%s/tunnel/%s/poll", brokerBaseURL, sessionID),
+		deleteURL:         fmt.Sprintf("%s/tunnel/%s", brokerBaseURL, sessionID),
+		httpClient:        httpClient,
+		authToken:         authToken,
+		readPipe:          NewBufferedPipe(),
+		transportFailedCh: make(chan struct{}),
+		stopCh:            make(chan struct{}),
 	}
 
 	c.wg.Add(1)
 	go c.pollLoop(pollInterval)
 
 	return c
+}
+
+// TransportFailed returns a channel that is closed when the HTTP transport
+// itself fails (network error, broker gone, session invalid). This is distinct
+// from a yamux session close caused by the remote peer.
+//
+// Callers should select on both yamuxSess.CloseChan() and conn.TransportFailed()
+// to distinguish provider disconnects (yamux close, transport still alive) from
+// broker disconnects (transport failed).
+func (c *HTTPConn) TransportFailed() <-chan struct{} {
+	return c.transportFailedCh
+}
+
+// signalTransportFailed closes transportFailedCh exactly once.
+func (c *HTTPConn) signalTransportFailed() {
+	c.transportFailOnce.Do(func() {
+		close(c.transportFailedCh)
+	})
 }
 
 // Read blocks until data is available from the broker's response.
@@ -169,8 +200,10 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 				return
 			}
 			log.Printf("httpconn: poll error: %v", err)
-			c.sleepOrStop(retryDelay)
-			continue
+			// Signal transport failure so callers can detect broker disconnect.
+			c.signalTransportFailed()
+			c.readPipe.Close()
+			return
 		}
 
 		// Read response body.
@@ -194,10 +227,11 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 			resp.Body.Close()
 			// No data, continue polling.
 		case http.StatusNotFound, http.StatusUnauthorized:
-			// Session not found or unauthorized - broker likely restarted or session expired.
-			// Close the connection so that upper layers (yamux) detect the failure and reconnect.
+			// Session not found or unauthorized — broker likely restarted or session expired.
+			// Signal transport failure and close the connection so upper layers detect it.
 			resp.Body.Close()
-			log.Printf("httpconn: session invalid (status %d), closing connection to trigger reconnect", resp.StatusCode)
+			log.Printf("httpconn: session invalid (status %d), signalling transport failure", resp.StatusCode)
+			c.signalTransportFailed()
 			c.readPipe.Close()
 			return
 		default:

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/DiamondGo/HttpBroker/internal/transport"
@@ -34,6 +35,7 @@ type Server struct {
 	logger   *zap.Logger
 	httpSrv  *http.Server
 	done     chan struct{} // signals cleanup goroutine to stop
+	stopOnce sync.Once     // ensures Stop() is idempotent
 }
 
 // NewServer creates a new broker Server.
@@ -102,10 +104,35 @@ func (s *Server) Start() error {
 	return s.httpSrv.ListenAndServe()
 }
 
-// Stop gracefully stops the server.
+// Stop gracefully stops the server. Safe to call multiple times.
+//
+// Shutdown sequence:
+//  1. Stop the HTTP server (no new requests accepted; in-flight requests drain).
+//  2. Close all active sessions so HandleProvider/HandleConsumer goroutines exit.
+//     Closing a session closes its BufferedPipes, causing yamux to get EOF and
+//     close, which unblocks CloseChan() and Accept() in the relay goroutines.
+//     Connected consumers and providers will detect the closure and reconnect.
+//  3. Stop the session cleanup goroutine.
 func (s *Server) Stop(ctx context.Context) error {
-	close(s.done)
-	return s.httpSrv.Shutdown(ctx)
+	var err error
+	s.stopOnce.Do(func() {
+		s.logger.Info("broker shutting down — draining HTTP connections and closing all sessions")
+
+		// 1. Stop accepting new HTTP connections and drain in-flight requests.
+		err = s.httpSrv.Shutdown(ctx)
+
+		// 2. Close all active sessions so relay goroutines exit cleanly.
+		//    This notifies connected consumers and providers that the broker is gone.
+		for _, session := range s.registry.AllSessions() {
+			session.Close()
+		}
+
+		// 3. Stop the cleanup goroutine.
+		close(s.done)
+
+		s.logger.Info("broker shutdown complete")
+	})
+	return err
 }
 
 // generateSessionID generates a random 32-character hex string.
@@ -176,10 +203,10 @@ func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
 // handlePoll handles POST /tunnel/{id}/poll.
 //
 // This endpoint now supports two modes:
-// 1. Send-only (X-Send-Only: true): Immediately sends data to ToBroker and returns 200 OK.
-//    Used by HTTPConn.Write() for immediate data transmission.
-// 2. Receive-only (X-Receive-Only: true): Long-polls FromBroker for data to send back.
-//    Used by HTTPConn.pollLoop() for continuous data reception.
+//  1. Send-only (X-Send-Only: true): Immediately sends data to ToBroker and returns 200 OK.
+//     Used by HTTPConn.Write() for immediate data transmission.
+//  2. Receive-only (X-Receive-Only: true): Long-polls FromBroker for data to send back.
+//     Used by HTTPConn.pollLoop() for continuous data reception.
 func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	sessionID := vars["id"]

@@ -9,15 +9,28 @@ import (
 	"time"
 )
 
+// Conn is the interface returned by Connector.Connect. It extends
+// io.ReadWriteCloser with a TransportFailed channel that is closed when the
+// underlying HTTP transport encounters a fatal error (network failure, broker
+// gone, session invalid). Callers can select on TransportFailed() alongside
+// yamux session close channels to distinguish broker-level failures from
+// peer-initiated session closes (e.g. provider disconnect).
+type Conn interface {
+	io.ReadWriteCloser
+	// TransportFailed returns a channel that is closed when the HTTP transport
+	// itself fails. This is distinct from a yamux session close caused by the
+	// remote peer.
+	TransportFailed() <-chan struct{}
+}
+
 // Connector creates a new tunnel connection to the broker.
-// It returns an io.ReadWriteCloser that can be used by yamux.
 // This interface allows swapping the transport implementation in future
 // (e.g., HTTP/2 streaming instead of HTTP/1.1 long-polling).
 type Connector interface {
 	// Connect registers this client with the broker for the given role and
 	// endpoint, then returns a virtual bidirectional connection.
 	// role: "consumer" or "provider"
-	Connect(brokerBaseURL, role, endpoint string) (io.ReadWriteCloser, error)
+	Connect(brokerBaseURL, role, endpoint string) (Conn, error)
 }
 
 // HTTPConnector implements Connector using HTTP long-polling.
@@ -34,7 +47,7 @@ type connectResponse struct {
 
 // Connect sends POST /tunnel/connect?role=role&endpoint=endpoint,
 // parses the session ID from the JSON response, and returns a new HTTPConn.
-func (c *HTTPConnector) Connect(brokerBaseURL, role, endpoint string) (io.ReadWriteCloser, error) {
+func (c *HTTPConnector) Connect(brokerBaseURL, role, endpoint string) (Conn, error) {
 	client := c.HTTPClient
 	if client == nil {
 		client = http.DefaultClient

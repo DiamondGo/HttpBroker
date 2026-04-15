@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -41,21 +42,28 @@ func NewClient(config Config, logger *zap.Logger) *Client {
 }
 
 // Run connects to the broker and starts accepting streams.
-// Reconnects automatically on failure. Blocks until ctx is cancelled.
+// On broker disconnection it retries with exponential backoff (1 s → 3 min).
+// Blocks until ctx is cancelled.
 func (c *Client) Run(ctx context.Context) error {
+	const (
+		initialBackoff = 1 * time.Second
+		maxBackoff     = 3 * time.Minute
+	)
+
+	backoff := initialBackoff
+
 	for {
-		// Check if context is cancelled before attempting connection.
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			c.logger.Info("provider shutting down",
+				zap.String("endpoint", c.config.Endpoint),
+			)
+			return err
 		}
 
-		// Step 1: Connect to broker.
-		// Create HTTP transport with no timeouts (supports long-lived connections and large data transfers)
+		// Build a fresh HTTP client for each connection attempt.
 		httpTransport := &http.Transport{
-			ResponseHeaderTimeout: 0, // no timeout waiting for response headers
-			IdleConnTimeout:       0, // no timeout for idle connections
+			ResponseHeaderTimeout: 0,
+			IdleConnTimeout:       0,
 			DisableKeepAlives:     false,
 		}
 		if c.config.InsecureSkipVerify {
@@ -64,7 +72,7 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 		}
 		httpClient := &http.Client{
-			Timeout:   0, // no timeout for long-poll
+			Timeout:   0,
 			Transport: httpTransport,
 		}
 
@@ -81,85 +89,135 @@ func (c *Client) Run(ctx context.Context) error {
 
 		conn, err := connector.Connect(c.config.BrokerURL, "provider", c.config.Endpoint)
 		if err != nil {
-			c.logger.Error("failed to connect to broker",
+			c.logger.Error("failed to connect to broker — will retry",
 				zap.Error(err),
+				zap.Duration("retry_in", backoff),
 			)
-			if !c.sleepOrDone(ctx, c.config.RetryBackoff) {
+			if !sleepOrDone(ctx, backoff) {
 				return ctx.Err()
 			}
+			backoff = minDuration(backoff*2, maxBackoff)
 			continue
 		}
 
-		// Step 2: Create yamux server session.
-		// Disable keepalives: the HTTP polling transport cannot reliably complete
-		// a PING-PONG round-trip within yamux's ConnectionWriteTimeout (10s).
-		yamuxConfig := yamux.DefaultConfig()
-		yamuxConfig.LogOutput = io.Discard
-		yamuxConfig.EnableKeepAlive = false
-
-		sess, err := yamux.Server(conn, yamuxConfig)
-		if err != nil {
-			c.logger.Error("failed to create yamux session",
-				zap.Error(err),
-			)
-			conn.Close()
-			if !c.sleepOrDone(ctx, c.config.RetryBackoff) {
-				return ctx.Err()
-			}
-			continue
-		}
-
+		// Connection established — reset backoff.
+		backoff = initialBackoff
 		c.logger.Info("connected to broker, accepting streams",
 			zap.String("endpoint", c.config.Endpoint),
 		)
 
-		// Step 3: Accept streams in a loop.
-		c.acceptStreams(ctx, sess)
+		// Run the accept loop until the connection is lost or ctx is cancelled.
+		c.runSession(ctx, conn)
 
-		// Step 4: Close yamux session and retry.
-		sess.Close()
+		conn.Close()
 
-		c.logger.Info("disconnected from broker, will reconnect",
-			zap.String("endpoint", c.config.Endpoint),
-		)
-
-		if !c.sleepOrDone(ctx, c.config.RetryBackoff) {
+		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+
+		// Connection lost — apply backoff before reconnecting.
+		c.logger.Warn("broker connection lost — reconnecting with backoff",
+			zap.Duration("retry_in", backoff),
+		)
+		if !sleepOrDone(ctx, backoff) {
+			return ctx.Err()
+		}
+		backoff = minDuration(backoff*2, maxBackoff)
 	}
 }
 
-// acceptStreams accepts yamux streams until an error occurs or ctx is cancelled.
-func (c *Client) acceptStreams(ctx context.Context, sess *yamux.Session) {
+// runSession creates a yamux server session over conn and accepts streams
+// until the connection is lost or ctx is cancelled.
+func (c *Client) runSession(ctx context.Context, conn transport.Conn) {
+	yamuxConfig := yamux.DefaultConfig()
+	yamuxConfig.LogOutput = io.Discard
+	yamuxConfig.EnableKeepAlive = false
+
+	sess, err := yamux.Server(conn, yamuxConfig)
+	if err != nil {
+		c.logger.Error("failed to create yamux session",
+			zap.Error(err),
+		)
+		return
+	}
+	defer sess.Close()
+
+	// acceptStreams blocks until an error occurs or ctx is cancelled.
+	c.acceptStreams(ctx, sess, conn)
+}
+
+// acceptStreams accepts yamux streams until an error occurs, the transport
+// fails, or ctx is cancelled. Each accepted stream is handled in a goroutine.
+func (c *Client) acceptStreams(ctx context.Context, sess *yamux.Session, conn transport.Conn) {
+	// Run Accept in a goroutine so we can also watch ctx and TransportFailed.
+	type acceptResult struct {
+		stream net.Conn
+		err    error
+	}
+	acceptCh := make(chan acceptResult, 1)
+
+	go func() {
+		for {
+			stream, err := sess.Accept()
+			acceptCh <- acceptResult{stream, err}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	streamCount := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		default:
-		}
 
-		c.logger.Debug("waiting for stream (yamux accept)")
-		stream, err := sess.Accept()
-		if err != nil {
-			if err != io.EOF {
-				c.logger.Debug("yamux accept error",
-					zap.Error(err),
-				)
-			}
+		case <-conn.TransportFailed():
+			c.logger.Warn("broker transport failed — stopping stream accept",
+				zap.String("endpoint", c.config.Endpoint),
+			)
 			return
-		}
 
-		c.logger.Debug("stream accepted")
-		go c.handler.Handle(stream)
+		case <-sess.CloseChan():
+			c.logger.Warn("yamux session closed — stopping stream accept",
+				zap.String("endpoint", c.config.Endpoint),
+			)
+			return
+
+		case res := <-acceptCh:
+			if res.err != nil {
+				if res.err != io.EOF {
+					c.logger.Debug("yamux accept error",
+						zap.Error(res.err),
+					)
+				}
+				return
+			}
+
+			streamCount++
+			c.logger.Info("new consumer stream accepted",
+				zap.String("endpoint", c.config.Endpoint),
+				zap.Int("stream_count", streamCount),
+			)
+			go c.handler.Handle(res.stream)
+		}
 	}
 }
 
-// sleepOrDone sleeps for the given duration or returns false if ctx is done.
-func (c *Client) sleepOrDone(ctx context.Context, d time.Duration) bool {
+// sleepOrDone sleeps for d or returns false if ctx is done.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	select {
 	case <-ctx.Done():
 		return false
 	case <-time.After(d):
 		return true
 	}
+}
+
+// minDuration returns the smaller of a and b.
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
