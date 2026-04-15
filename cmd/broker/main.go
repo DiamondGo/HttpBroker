@@ -15,6 +15,10 @@ import (
 	"github.com/DiamondGo/HttpBroker/internal/config"
 )
 
+var (
+	version = "dev" // Version number, set at build time
+)
+
 func main() {
 	var configFile string
 	var listenAddr string
@@ -77,6 +81,7 @@ func main() {
 				SessionTimeout: cfg.Tunnel.SessionTimeout,
 				AuthEnabled:    cfg.Auth.Enabled,
 				AuthToken:      cfg.Auth.Token,
+				Version:        version, // Pass version to broker config
 			}
 
 			// Create and start server

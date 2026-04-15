@@ -25,6 +25,7 @@ type Config struct {
 	SessionTimeout time.Duration // inactive session cleanup interval (default 5m)
 	AuthEnabled    bool          // whether authentication is enabled
 	AuthToken      string        // authentication token (used when AuthEnabled is true)
+	Version        string        // broker version
 }
 
 // Server is the broker HTTP server.
@@ -36,6 +37,7 @@ type Server struct {
 	httpSrv  *http.Server
 	done     chan struct{} // signals cleanup goroutine to stop
 	stopOnce sync.Once     // ensures Stop() is idempotent
+	version  string        // broker version
 }
 
 // NewServer creates a new broker Server.
@@ -56,6 +58,7 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		relay:    relay,
 		logger:   logger,
 		done:     make(chan struct{}),
+		version:  config.Version,
 	}
 
 	router := mux.NewRouter()
@@ -316,15 +319,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	for name, ep := range s.registry.endpoints {
 		ep.mu.RLock()
 		hasProvider := ep.ProviderSession != nil
+		consumerCount := len(ep.ConsumerSessions)
 		ep.mu.RUnlock()
-
-		// Count consumers for this endpoint.
-		consumerCount := 0
-		for _, sess := range s.registry.sessions {
-			if sess.Endpoint == name && sess.Role == "consumer" {
-				consumerCount++
-			}
-		}
 
 		statuses = append(statuses, endpointStatus{
 			Name:          name,
@@ -334,6 +330,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"version":   s.version,
 		"endpoints": statuses,
 	})
 }

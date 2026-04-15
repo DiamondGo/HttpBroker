@@ -11,9 +11,10 @@ import (
 
 // Endpoint represents a named proxy endpoint with one provider and N consumers.
 type Endpoint struct {
-	Name            string
-	ProviderSession *transport.Session // nil if no provider connected
-	ProviderYamux   *yamux.Session     // yamux client toward provider
+	Name             string
+	ProviderSession  *transport.Session            // nil if no provider connected
+	ProviderYamux    *yamux.Session                // yamux client toward provider
+	ConsumerSessions map[string]*transport.Session // session ID -> consumer session
 
 	// consumerYamuxSessions tracks all active consumer yamux sessions for this
 	// endpoint so that when the provider disconnects we can close them all,
@@ -50,6 +51,7 @@ func (r *EndpointRegistry) GetOrCreate(name string) *Endpoint {
 
 	ep := &Endpoint{
 		Name:                  name,
+		ConsumerSessions:      make(map[string]*transport.Session),
 		consumerYamuxSessions: make(map[string]*yamux.Session),
 	}
 	// cond uses its own dedicated mutex so it doesn't conflict with ep.mu.
@@ -190,6 +192,13 @@ func (r *EndpointRegistry) RemoveProvider(endpointName string) {
 	}
 	// Clear the map — consumers will re-register when they reconnect.
 	ep.consumerYamuxSessions = make(map[string]*yamux.Session)
+	// Also clear ConsumerSessions and remove them from the global sessions map.
+	for sessionID := range ep.ConsumerSessions {
+		r.mu.Lock()
+		delete(r.sessions, sessionID)
+		r.mu.Unlock()
+	}
+	ep.ConsumerSessions = make(map[string]*transport.Session)
 	ep.mu.Unlock()
 
 	if providerSession != nil {
@@ -217,11 +226,15 @@ func (r *EndpointRegistry) RegisterSession(session *transport.Session) {
 
 // AddConsumer registers a consumer session.
 func (r *EndpointRegistry) AddConsumer(endpointName string, session *transport.Session) {
-	_ = r.GetOrCreate(endpointName)
+	ep := r.GetOrCreate(endpointName)
 
 	r.mu.Lock()
 	r.sessions[session.ID] = session
 	r.mu.Unlock()
+
+	ep.mu.Lock()
+	ep.ConsumerSessions[session.ID] = session
+	ep.mu.Unlock()
 }
 
 // RegisterConsumerYamux stores the consumer's yamux session so it can be
@@ -281,6 +294,16 @@ func (r *EndpointRegistry) RemoveSession(sessionID string) {
 				ep.ProviderSession = nil
 				ep.ProviderYamux = nil
 			}
+			ep.mu.Unlock()
+		}
+	} else if session.Role == "consumer" {
+		r.mu.RLock()
+		ep, epOk := r.endpoints[session.Endpoint]
+		r.mu.RUnlock()
+
+		if epOk {
+			ep.mu.Lock()
+			delete(ep.ConsumerSessions, sessionID)
 			ep.mu.Unlock()
 		}
 	}
