@@ -77,11 +77,27 @@ func (c *HTTPConnector) Connect(brokerBaseURL, role, endpoint string) (Conn, err
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf(
-			"transport: broker returned status %d: %s",
-			resp.StatusCode,
-			string(body),
-		)
+
+		// Provide helpful error messages for common auth-related failures
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			return nil, fmt.Errorf(
+				"transport: authentication failed (status 401) — check that auth_token matches broker configuration: %s",
+				string(body),
+			)
+		case http.StatusFound: // 302 redirect
+			location := resp.Header.Get("Location")
+			return nil, fmt.Errorf(
+				"transport: broker redirected to %q (status 302) — this usually means authentication failed or broker has unauthorized_redirect enabled. Check auth_token configuration",
+				location,
+			)
+		default:
+			return nil, fmt.Errorf(
+				"transport: broker returned status %d: %s",
+				resp.StatusCode,
+				string(body),
+			)
+		}
 	}
 
 	var cr connectResponse

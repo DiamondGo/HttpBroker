@@ -19,9 +19,10 @@ type BrokerConfig struct {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Listen               string    `mapstructure:"listen"`
-	TLS                  TLSConfig `mapstructure:"tls"`
-	StatusEndpointEnabled bool      `mapstructure:"status_endpoint_enabled"` // Whether to expose GET /status endpoint (default: false)
+	Listen                string                      `mapstructure:"listen"`
+	TLS                   TLSConfig                   `mapstructure:"tls"`
+	StatusEndpointEnabled bool                        `mapstructure:"status_endpoint_enabled"` // Whether to expose GET /status endpoint (default: false)
+	UnauthorizedRedirect  UnauthorizedRedirectConfig  `mapstructure:"unauthorized_redirect"`   // Redirect settings for unauthorized requests
 }
 
 // TLSConfig holds TLS certificate paths.
@@ -29,6 +30,12 @@ type TLSConfig struct {
 	Enabled  bool   `mapstructure:"enabled"`
 	CertFile string `mapstructure:"cert_file"`
 	KeyFile  string `mapstructure:"key_file"`
+}
+
+// UnauthorizedRedirectConfig holds redirect settings for unauthorized requests.
+type UnauthorizedRedirectConfig struct {
+	Enabled bool   `mapstructure:"enabled"` // Whether to redirect unauthorized requests instead of returning 401/404
+	URL     string `mapstructure:"url"`     // Redirect target URL (supports: "/path", "www.example.com", or "https://example.com")
 }
 
 // TunnelConfig holds tunnel timing settings.

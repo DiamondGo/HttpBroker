@@ -5,6 +5,12 @@ server:
     cert_file: ""
     key_file: ""
   status_endpoint_enabled: false  # Expose GET /status endpoint (default: false for security)
+  unauthorized_redirect:
+    enabled: false  # Redirect unauthorized requests instead of returning 401/404 (default: false)
+    url: ""         # Redirect target URL. Supports three formats:
+                    # 1. "/path" - same-site path
+                    # 2. "www.example.com" - domain (auto-prefixed with http/https based on current request)
+                    # 3. "https://example.com" - full URL (used as-is, ignoring current request scheme)
 
 tunnel:
   poll_timeout: "45s"

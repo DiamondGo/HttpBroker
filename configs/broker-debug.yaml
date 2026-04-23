@@ -5,6 +5,9 @@ server:
     cert_file: ""
     key_file: ""
   status_endpoint_enabled: true  # Enable for debugging/monitoring
+  unauthorized_redirect:
+    enabled: false  # Redirect unauthorized requests instead of returning 401/404
+    url: ""         # Example: "/login", "www.example.com", or "https://example.com"
 
 tunnel:
   poll_timeout: "45s"

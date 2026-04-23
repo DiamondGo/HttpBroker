@@ -1,0 +1,32 @@
+# Example Broker configuration with unauthorized redirect enabled
+# This demonstrates how to redirect unauthorized requests to another URL
+
+server:
+  listen: ":8080"
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+  status_endpoint_enabled: false
+  unauthorized_redirect:
+    enabled: true           # Enable redirect for unauthorized requests
+    url: "www.google.com"   # Redirect to Google (will use http:// or https:// based on current request)
+    # Other examples:
+    # url: "/login"                    # Same-site redirect to /login page
+    # url: "https://example.com"       # Force HTTPS redirect to example.com
+
+tunnel:
+  poll_timeout: "45s"
+  session_timeout: "15m"
+
+auth:
+  enabled: true
+  token: "my-secret-token-123"  # Only requests with valid token can access tunnel endpoints
+
+logging:
+  level: "info"
+
+# BEHAVIOR:
+# - Requests to /tunnel/* without valid auth token -> 302 redirect to www.google.com
+# - Requests to non-existent paths (e.g. /, /admin, etc) -> 302 redirect to www.google.com
+# - No error messages are returned, only 302 redirect

@@ -234,6 +234,15 @@ func (c *HTTPConn) pollLoop(pollInterval time.Duration) {
 			c.signalTransportFailed()
 			c.readPipe.Close()
 			return
+		case http.StatusFound: // 302 redirect
+			// Broker redirected the request — this usually means authentication failed
+			// or broker has unauthorized_redirect enabled.
+			location := resp.Header.Get("Location")
+			resp.Body.Close()
+			log.Printf("httpconn: broker redirected to %q (status 302) — likely authentication failure or misconfiguration. Check auth_token setting. Signalling transport failure", location)
+			c.signalTransportFailed()
+			c.readPipe.Close()
+			return
 		default:
 			resp.Body.Close()
 			log.Printf("httpconn: unexpected status %d from broker", resp.StatusCode)

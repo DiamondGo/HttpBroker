@@ -411,6 +411,10 @@ server:
     enabled: false         # Enable TLS
     cert_file: ""          # Path to TLS certificate
     key_file: ""           # Path to TLS private key
+  status_endpoint_enabled: false  # Expose GET /status endpoint (default: false)
+  unauthorized_redirect:
+    enabled: false         # Redirect unauthorized requests instead of returning 401/404
+    url: ""                # Redirect target URL (see below for format options)
 
 tunnel:
   poll_timeout: "5s"       # How long to hold a poll request before returning empty
@@ -423,6 +427,16 @@ auth:
 logging:
   level: "info"            # Log level: debug, info, warn, error
 ```
+
+**Unauthorized Redirect URL Formats:**
+
+The `unauthorized_redirect.url` field supports three formats:
+
+1. **Same-site path**: `/login` — Redirects to a path on the same server
+2. **Domain only**: `www.example.com` — Auto-prefixed with `http://` or `https://` based on the current request scheme
+3. **Full URL**: `https://www.example.com` — Used as-is, regardless of current request scheme
+
+When enabled, unauthorized requests (invalid/missing auth tokens or non-tunnel paths) return `302 Found` instead of `401 Unauthorized` or `404 Not Found`. This prevents revealing that the server is a broker to unauthorized parties.
 
 ### Consumer (`configs/consumer.yaml`)
 

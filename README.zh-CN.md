@@ -411,6 +411,10 @@ server:
     enabled: false         # 启用 TLS
     cert_file: ""          # TLS 证书路径
     key_file: ""           # TLS 私钥路径
+  status_endpoint_enabled: false  # 公开 GET /status 端点（默认：false）
+  unauthorized_redirect:
+    enabled: false         # 重定向未授权请求而不是返回 401/404
+    url: ""                # 重定向目标 URL（格式选项见下文）
 
 tunnel:
   poll_timeout: "5s"       # 在返回空响应之前保持轮询请求多长时间
@@ -423,6 +427,16 @@ auth:
 logging:
   level: "info"            # 日志级别：debug、info、warn、error
 ```
+
+**未授权重定向 URL 格式：**
+
+`unauthorized_redirect.url` 字段支持三种格式：
+
+1. **同站路径**：`/login` — 重定向到同一服务器上的路径
+2. **仅域名**：`www.example.com` — 根据当前请求协议自动添加 `http://` 或 `https://` 前缀
+3. **完整 URL**：`https://www.example.com` — 按原样使用，不考虑当前请求协议
+
+启用后，未授权的请求（无效/缺少身份验证令牌或非隧道路径）将返回 `302 Found` 而不是 `401 Unauthorized` 或 `404 Not Found`。这可以防止向未授权方透露服务器是一个 broker。
 
 ### Consumer（`configs/consumer.yaml`）
 

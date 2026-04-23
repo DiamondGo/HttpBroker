@@ -77,16 +77,18 @@ func main() {
 
 			// Build broker config
 			brokerCfg := broker.Config{
-				ListenAddr:            cfg.Server.Listen,
-				UseTLS:                cfg.Server.TLS.Enabled,
-				TLSCertFile:           cfg.Server.TLS.CertFile,
-				TLSKeyFile:            cfg.Server.TLS.KeyFile,
-				PollTimeout:           cfg.Tunnel.PollTimeout,
-				SessionTimeout:        cfg.Tunnel.SessionTimeout,
-				AuthEnabled:           cfg.Auth.Enabled,
-				AuthToken:             cfg.Auth.Token,
-				StatusEndpointEnabled: cfg.Server.StatusEndpointEnabled,
-				Version:               version, // Pass version to broker config
+				ListenAddr:                  cfg.Server.Listen,
+				UseTLS:                      cfg.Server.TLS.Enabled,
+				TLSCertFile:                 cfg.Server.TLS.CertFile,
+				TLSKeyFile:                  cfg.Server.TLS.KeyFile,
+				PollTimeout:                 cfg.Tunnel.PollTimeout,
+				SessionTimeout:              cfg.Tunnel.SessionTimeout,
+				AuthEnabled:                 cfg.Auth.Enabled,
+				AuthToken:                   cfg.Auth.Token,
+				StatusEndpointEnabled:       cfg.Server.StatusEndpointEnabled,
+				UnauthorizedRedirectEnabled: cfg.Server.UnauthorizedRedirect.Enabled,
+				UnauthorizedRedirectURL:     cfg.Server.UnauthorizedRedirect.URL,
+				Version:                     version, // Pass version to broker config
 			}
 
 			// Create and start server

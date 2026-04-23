@@ -17,16 +17,18 @@ import (
 
 // Config holds broker server configuration.
 type Config struct {
-	ListenAddr            string
-	TLSCertFile           string
-	TLSKeyFile            string
-	UseTLS                bool
-	PollTimeout           time.Duration // how long to hold poll before empty response (default 30s)
-	SessionTimeout        time.Duration // inactive session cleanup interval (default 5m)
-	AuthEnabled           bool          // whether authentication is enabled
-	AuthToken             string        // authentication token (used when AuthEnabled is true)
-	StatusEndpointEnabled bool          // whether to expose GET /status endpoint (default: false)
-	Version               string        // broker version
+	ListenAddr                  string
+	TLSCertFile                 string
+	TLSKeyFile                  string
+	UseTLS                      bool
+	PollTimeout                 time.Duration // how long to hold poll before empty response (default 30s)
+	SessionTimeout              time.Duration // inactive session cleanup interval (default 5m)
+	AuthEnabled                 bool          // whether authentication is enabled
+	AuthToken                   string        // authentication token (used when AuthEnabled is true)
+	StatusEndpointEnabled       bool          // whether to expose GET /status endpoint (default: false)
+	UnauthorizedRedirectEnabled bool          // whether to redirect unauthorized requests instead of returning 401/404
+	UnauthorizedRedirectURL     string        // redirect target URL for unauthorized requests
+	Version                     string        // broker version
 }
 
 // Server is the broker HTTP server.
@@ -79,11 +81,11 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		logger.Info("authentication disabled")
 	}
 
-	router.Handle("/tunnel/connect", AuthMiddleware(auth, http.HandlerFunc(s.handleConnect))).
+	router.Handle("/tunnel/connect", AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL, http.HandlerFunc(s.handleConnect))).
 		Methods("POST")
-	router.Handle("/tunnel/{id}/poll", AuthMiddleware(auth, http.HandlerFunc(s.handlePoll))).
+	router.Handle("/tunnel/{id}/poll", AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL, http.HandlerFunc(s.handlePoll))).
 		Methods("POST")
-	router.Handle("/tunnel/{id}", AuthMiddleware(auth, http.HandlerFunc(s.handleDelete))).
+	router.Handle("/tunnel/{id}", AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL, http.HandlerFunc(s.handleDelete))).
 		Methods("DELETE")
 
 	// Conditionally register /status endpoint based on configuration
@@ -92,6 +94,14 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		logger.Info("status endpoint enabled at GET /status")
 	} else {
 		logger.Info("status endpoint disabled")
+	}
+
+	// If unauthorized redirect is enabled, set up a catch-all handler for non-tunnel requests
+	if config.UnauthorizedRedirectEnabled && config.UnauthorizedRedirectURL != "" {
+		router.NotFoundHandler = http.HandlerFunc(s.handleUnauthorizedRedirect)
+		logger.Info("unauthorized redirect enabled",
+			zap.String("target_url", config.UnauthorizedRedirectURL),
+		)
 	}
 
 	s.httpSrv = &http.Server{
@@ -341,6 +351,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"version":   s.version,
 		"endpoints": statuses,
 	})
+}
+
+// handleUnauthorizedRedirect handles all non-tunnel requests when redirect is enabled.
+// It redirects the request to the configured URL with a 302 status code.
+func (s *Server) handleUnauthorizedRedirect(w http.ResponseWriter, r *http.Request) {
+	targetURL := buildRedirectURL(s.config.UnauthorizedRedirectURL, r)
+	http.Redirect(w, r, targetURL, http.StatusFound)
 }
 
 // cleanupLoop periodically removes expired sessions.

@@ -8,6 +8,9 @@ server:
     cert_file: ""          # Path to TLS certificate
     key_file: ""           # Path to TLS private key
   status_endpoint_enabled: false  # Expose GET /status endpoint (default: false for security)
+  unauthorized_redirect:
+    enabled: false  # Redirect unauthorized requests instead of returning 401/404
+    url: ""         # Example: "/login", "www.example.com", or "https://example.com"
 
 tunnel:
   poll_timeout: "45s"

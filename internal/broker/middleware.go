@@ -6,6 +6,39 @@ import (
 	"strings"
 )
 
+// buildRedirectURL constructs the redirect URL based on the configured URL and current request.
+// Supports three formats:
+//  1. "/path" - same-site path, used as-is
+//  2. "www.example.com" - domain name, auto-prefixed with http/https based on current request
+//  3. "https://example.com" - full URL with scheme, used as-is
+func buildRedirectURL(configuredURL string, r *http.Request) string {
+	if configuredURL == "" {
+		return "/"
+	}
+
+	// Case 1: Relative path starting with "/"
+	if strings.HasPrefix(configuredURL, "/") {
+		return configuredURL
+	}
+
+	// Case 2: Full URL with scheme (http:// or https://)
+	if strings.HasPrefix(configuredURL, "http://") || strings.HasPrefix(configuredURL, "https://") {
+		return configuredURL
+	}
+
+	// Case 3: Domain name without scheme - determine scheme from current request
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	// Support reverse proxy scenario (X-Forwarded-Proto header)
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+
+	return scheme + "://" + configuredURL
+}
+
 // Authenticator is the interface for request authentication.
 type Authenticator interface {
 	Authenticate(r *http.Request) error
@@ -58,10 +91,19 @@ func (a *TokenAuthenticator) Authenticate(r *http.Request) error {
 }
 
 // AuthMiddleware wraps an http.Handler with authentication.
-// If authentication fails, it returns a 401 Unauthorized response.
-func AuthMiddleware(auth Authenticator, next http.Handler) http.Handler {
+// If authentication fails:
+//   - When redirectEnabled is true and redirectURL is set: redirects to the configured URL with 302
+//   - Otherwise: returns a 401 Unauthorized response
+func AuthMiddleware(auth Authenticator, redirectEnabled bool, redirectURL string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := auth.Authenticate(r); err != nil {
+			// If redirect is enabled, redirect instead of returning 401
+			if redirectEnabled && redirectURL != "" {
+				targetURL := buildRedirectURL(redirectURL, r)
+				http.Redirect(w, r, targetURL, http.StatusFound)
+				return
+			}
+			// Default behavior: return 401 Unauthorized
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
