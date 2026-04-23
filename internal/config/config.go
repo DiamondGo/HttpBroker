@@ -19,8 +19,9 @@ type BrokerConfig struct {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Listen string    `mapstructure:"listen"`
-	TLS    TLSConfig `mapstructure:"tls"`
+	Listen               string    `mapstructure:"listen"`
+	TLS                  TLSConfig `mapstructure:"tls"`
+	StatusEndpointEnabled bool      `mapstructure:"status_endpoint_enabled"` // Whether to expose GET /status endpoint (default: false)
 }
 
 // TLSConfig holds TLS certificate paths.

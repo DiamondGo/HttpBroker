@@ -1,6 +1,6 @@
 module github.com/DiamondGo/HttpBroker/test
 
-go 1.25.6
+go 1.25.0
 
 require (
 	github.com/DiamondGo/HttpBroker v0.0.0

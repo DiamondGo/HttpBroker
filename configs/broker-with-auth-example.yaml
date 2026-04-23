@@ -7,6 +7,7 @@ server:
     enabled: false         # IMPORTANT: Set to true in production when using auth
     cert_file: ""          # Path to TLS certificate
     key_file: ""           # Path to TLS private key
+  status_endpoint_enabled: false  # Expose GET /status endpoint (default: false for security)
 
 tunnel:
   poll_timeout: "45s"

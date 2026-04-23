@@ -24,6 +24,7 @@ func main() {
 	var listenAddr string
 	var tlsCert string
 	var tlsKey string
+	var enableStatusEndpoint bool
 
 	rootCmd := &cobra.Command{
 		Use:   "httpbroker-broker",
@@ -47,6 +48,9 @@ func main() {
 			if tlsKey != "" {
 				cfg.Server.TLS.KeyFile = tlsKey
 				cfg.Server.TLS.Enabled = true
+			}
+			if enableStatusEndpoint {
+				cfg.Server.StatusEndpointEnabled = true
 			}
 
 			// Apply defaults
@@ -73,15 +77,16 @@ func main() {
 
 			// Build broker config
 			brokerCfg := broker.Config{
-				ListenAddr:     cfg.Server.Listen,
-				UseTLS:         cfg.Server.TLS.Enabled,
-				TLSCertFile:    cfg.Server.TLS.CertFile,
-				TLSKeyFile:     cfg.Server.TLS.KeyFile,
-				PollTimeout:    cfg.Tunnel.PollTimeout,
-				SessionTimeout: cfg.Tunnel.SessionTimeout,
-				AuthEnabled:    cfg.Auth.Enabled,
-				AuthToken:      cfg.Auth.Token,
-				Version:        version, // Pass version to broker config
+				ListenAddr:            cfg.Server.Listen,
+				UseTLS:                cfg.Server.TLS.Enabled,
+				TLSCertFile:           cfg.Server.TLS.CertFile,
+				TLSKeyFile:            cfg.Server.TLS.KeyFile,
+				PollTimeout:           cfg.Tunnel.PollTimeout,
+				SessionTimeout:        cfg.Tunnel.SessionTimeout,
+				AuthEnabled:           cfg.Auth.Enabled,
+				AuthToken:             cfg.Auth.Token,
+				StatusEndpointEnabled: cfg.Server.StatusEndpointEnabled,
+				Version:               version, // Pass version to broker config
 			}
 
 			// Create and start server
@@ -108,6 +113,7 @@ func main() {
 	rootCmd.Flags().StringVar(&listenAddr, "listen", "", "override listen address (e.g. :8080)")
 	rootCmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate file")
 	rootCmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS key file")
+	rootCmd.Flags().BoolVar(&enableStatusEndpoint, "enable-status", false, "enable GET /status endpoint")
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

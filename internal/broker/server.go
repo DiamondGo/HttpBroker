@@ -17,15 +17,16 @@ import (
 
 // Config holds broker server configuration.
 type Config struct {
-	ListenAddr     string
-	TLSCertFile    string
-	TLSKeyFile     string
-	UseTLS         bool
-	PollTimeout    time.Duration // how long to hold poll before empty response (default 30s)
-	SessionTimeout time.Duration // inactive session cleanup interval (default 5m)
-	AuthEnabled    bool          // whether authentication is enabled
-	AuthToken      string        // authentication token (used when AuthEnabled is true)
-	Version        string        // broker version
+	ListenAddr            string
+	TLSCertFile           string
+	TLSKeyFile            string
+	UseTLS                bool
+	PollTimeout           time.Duration // how long to hold poll before empty response (default 30s)
+	SessionTimeout        time.Duration // inactive session cleanup interval (default 5m)
+	AuthEnabled           bool          // whether authentication is enabled
+	AuthToken             string        // authentication token (used when AuthEnabled is true)
+	StatusEndpointEnabled bool          // whether to expose GET /status endpoint (default: false)
+	Version               string        // broker version
 }
 
 // Server is the broker HTTP server.
@@ -84,7 +85,14 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		Methods("POST")
 	router.Handle("/tunnel/{id}", AuthMiddleware(auth, http.HandlerFunc(s.handleDelete))).
 		Methods("DELETE")
-	router.HandleFunc("/status", s.handleStatus).Methods("GET")
+
+	// Conditionally register /status endpoint based on configuration
+	if config.StatusEndpointEnabled {
+		router.HandleFunc("/status", s.handleStatus).Methods("GET")
+		logger.Info("status endpoint enabled at GET /status")
+	} else {
+		logger.Info("status endpoint disabled")
+	}
 
 	s.httpSrv = &http.Server{
 		Addr:    config.ListenAddr,

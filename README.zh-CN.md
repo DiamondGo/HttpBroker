@@ -179,11 +179,17 @@ make build-release VERSION=v1.0.0
 
 broker 默认监听 `:8080` 并等待 Consumer 和 Provider 连接。
 
-**健康检查：**
+**健康检查（需要 --enable-status 标志）：**
 
 ```bash
+# 启用状态端点进行监控
+./bin/httpbroker-broker --listen :8080 --enable-status
+
+# 检查 broker 健康状态
 curl http://BROKER_IP:8080/status
 ```
+
+**注意：** `/status` 端点**默认禁用**以确保安全。使用 `--enable-status` 标志或在配置文件中设置 `status_endpoint_enabled: true` 来启用它。安全考虑请参见 [AUTHENTICATION.md](AUTHENTICATION.md#status-endpoint-security)。
 
 #### 为 HTTPS 生成自签名证书
 

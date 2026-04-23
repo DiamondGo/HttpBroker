@@ -177,12 +177,15 @@ lsof -i :10800
 ### Slow speeds or timeouts
 **Possible causes**:
 - Network congestion
-- Long `poll_timeout` in older architecture (should be resolved with dual-connection)
+- Long `poll_timeout` setting (default: 45s in broker config)
 - Provider's network connection is slow
+- High latency between broker and provider/consumer
 
-**Solution**: 
+**Solution**:
 - Check provider's actual network speed
-- Verify dual-connection architecture is working (check logs for "temporary connection" messages)
+- Verify all three services (broker, provider, consumer) are running and connected
+- Check broker logs for session activity and errors
+- Consider reducing `poll_timeout` in broker config for faster responses (trade-off: more frequent polling)
 
 ## Advanced Usage
 

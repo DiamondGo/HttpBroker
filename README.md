@@ -179,11 +179,17 @@ Binaries are placed in the `bin/` directory.
 
 The broker listens on `:8080` by default and waits for Consumer and Provider connections.
 
-**Health check:**
+**Health check (requires --enable-status flag):**
 
 ```bash
+# Enable status endpoint for monitoring
+./bin/httpbroker-broker --listen :8080 --enable-status
+
+# Check broker health
 curl http://BROKER_IP:8080/status
 ```
+
+**Note:** The `/status` endpoint is **disabled by default** for security. Enable it with `--enable-status` flag or set `status_endpoint_enabled: true` in the config file. See [AUTHENTICATION.md](AUTHENTICATION.md#status-endpoint-security) for security considerations.
 
 #### Generating Self-Signed Certificates for HTTPS
 

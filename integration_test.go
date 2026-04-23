@@ -123,7 +123,7 @@ const testEndpoint = "integration-test"
 func launchBroker(t *testing.T, port int) *component {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	cmd := exec.Command("./bin/httpbroker-broker", "--listen", addr)
+	cmd := exec.Command("./bin/httpbroker-broker", "--listen", addr, "--enable-status")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

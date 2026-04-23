@@ -163,6 +163,52 @@ auth:
   enabled: false
 ```
 
+## Status Endpoint Security
+
+The `/status` endpoint is **disabled by default** for security reasons. It exposes information about active endpoints, provider connections, and consumer counts.
+
+### Enabling the Status Endpoint
+
+**In configuration file** (`configs/broker.yaml`):
+
+```yaml
+server:
+  status_endpoint_enabled: true  # Enable GET /status endpoint
+```
+
+**Via command-line flag**:
+
+```bash
+./bin/httpbroker-broker --enable-status
+```
+
+### What Information is Exposed?
+
+When enabled, `GET /status` returns:
+
+```json
+{
+  "version": "v1.0.0",
+  "endpoints": [
+    {
+      "name": "default",
+      "has_provider": true,
+      "consumer_count": 2
+    }
+  ]
+}
+```
+
+### Security Recommendations
+
+- **Keep disabled in production** unless you have a specific monitoring need
+- If enabled, consider:
+  - Using a reverse proxy with IP whitelisting
+  - Adding custom authentication middleware
+  - Placing it behind a VPN or internal network
+- The endpoint does NOT require authentication by design (for health checks)
+- Monitor access logs for unexpected `/status` requests
+
 Remove or leave empty the `auth_token` field in consumer/provider configs:
 
 ```yaml

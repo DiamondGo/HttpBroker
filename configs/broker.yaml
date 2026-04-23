@@ -4,6 +4,7 @@ server:
     enabled: false
     cert_file: ""
     key_file: ""
+  status_endpoint_enabled: false  # Expose GET /status endpoint (default: false for security)
 
 tunnel:
   poll_timeout: "45s"
