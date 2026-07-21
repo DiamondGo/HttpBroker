@@ -15,7 +15,8 @@ import (
 //
 // Design:
 // 1. A dedicated long-polling connection continuously receives data from the broker.
-// 2. Each Write() creates a temporary connection to send data immediately.
+// 2. Write() buffers data and sends it via temporary connections, coalescing
+//    back-to-back writes into as few requests as possible (see writeCoalesceWindow).
 // 3. All responses (including acknowledgments of writes) come through the long-polling connection.
 //
 // This design eliminates the need to wait for the previous poll to complete before sending new data.
@@ -44,7 +45,29 @@ type HTTPConn struct {
 	closed int32 // atomic: 0=open, 1=closed
 	stopCh chan struct{}
 	wg     sync.WaitGroup
+
+	// Write-side coalescing: yamux always issues a frame's header and body as
+	// two back-to-back Write() calls (and, under load, many frames queue up
+	// while a previous send is still in flight). Sending each Write() as its
+	// own HTTP request is fine on a near-zero-latency link, but once real
+	// network RTT is involved (e.g. through a public reverse proxy) it turns
+	// every tiny write into a full round trip and craters throughput. See
+	// writeCoalesceWindow below for why a short fixed window is used instead
+	// of a purely race-based (zero-wait) merge.
+	writeMu       sync.Mutex
+	writeBuf      []byte
+	writeFlightOn bool
 }
+
+// writeCoalesceWindow is the delay before the *first* send of an idle-to-active
+// write burst, giving any immediately-following Write() calls (most reliably,
+// yamux's header+body pair for the same frame) a chance to land in the same
+// buffer and go out as a single HTTP request. It is paid once per burst, not
+// per Write() call: once a request is in flight, any further writes queue up
+// and are picked up on the next iteration with no additional wait. 2ms is
+// negligible against real WAN round trips (100ms+) but bounds the worst case
+// added latency for a near-zero-latency (e.g. same-host/LAN) deployment.
+const writeCoalesceWindow = 2 * time.Millisecond
 
 // NewHTTPConn creates an HTTPConn and starts the background poll goroutine.
 // pollInterval is the minimum time to wait between polls when no data is available.
@@ -96,8 +119,13 @@ func (c *HTTPConn) Read(p []byte) (int, error) {
 	return c.readPipe.Read(p)
 }
 
-// Write immediately sends data to the broker via a temporary POST request.
-// It does not wait for the long-polling connection.
+// Write buffers data and ensures it is sent to the broker, coalescing
+// back-to-back writes into as few HTTP requests as possible (see
+// writeCoalesceWindow). It returns once the data is queued for sending, not
+// once the broker has acknowledged it — matching how a real net.Conn's
+// Write() only guarantees local queuing, not peer delivery. Any send failure
+// is reported asynchronously via TransportFailed(), the same mechanism
+// already used by the poll loop.
 func (c *HTTPConn) Write(p []byte) (int, error) {
 	if atomic.LoadInt32(&c.closed) == 1 {
 		return 0, io.ErrClosedPipe
@@ -107,10 +135,63 @@ func (c *HTTPConn) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	// Create a temporary connection to send this data
-	req, err := http.NewRequest(http.MethodPost, c.pollURL, bytes.NewReader(p))
+	c.writeMu.Lock()
+	c.writeBuf = append(c.writeBuf, p...)
+	if c.writeFlightOn {
+		c.writeMu.Unlock()
+		return len(p), nil
+	}
+	c.writeFlightOn = true
+	c.writeMu.Unlock()
+
+	c.wg.Add(1)
+	go c.flushLoop()
+
+	return len(p), nil
+}
+
+// flushLoop drains writeBuf and sends it to the broker, repeating until the
+// buffer is empty. The first send of a burst waits writeCoalesceWindow to
+// give immediately-following Write() calls a chance to merge in; subsequent
+// sends within the same burst fire as soon as the previous one completes,
+// picking up whatever accumulated during that round trip.
+func (c *HTTPConn) flushLoop() {
+	defer c.wg.Done()
+
+	first := true
+	for {
+		if first {
+			time.Sleep(writeCoalesceWindow)
+			first = false
+		}
+
+		c.writeMu.Lock()
+		buf := c.writeBuf
+		c.writeBuf = nil
+		if len(buf) == 0 {
+			c.writeFlightOn = false
+			c.writeMu.Unlock()
+			return
+		}
+		c.writeMu.Unlock()
+
+		if err := c.doSend(buf); err != nil {
+			log.Printf("httpconn: write failed: %v", err)
+			c.signalTransportFailed()
+			c.readPipe.Close()
+			c.writeMu.Lock()
+			c.writeFlightOn = false
+			c.writeMu.Unlock()
+			return
+		}
+	}
+}
+
+// doSend POSTs buf to the broker as a single send-only request.
+func (c *HTTPConn) doSend(buf []byte) error {
+	req, err := http.NewRequest(http.MethodPost, c.pollURL, bytes.NewReader(buf))
 	if err != nil {
-		return 0, fmt.Errorf("failed to create send request: %w", err)
+		return fmt.Errorf("failed to create send request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.Header.Set("X-Send-Only", "true") // Signal to broker this is a send-only request
@@ -122,7 +203,7 @@ func (c *HTTPConn) Write(p []byte) (int, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("failed to send data: %w", err)
+		return fmt.Errorf("failed to send data: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -130,9 +211,9 @@ func (c *HTTPConn) Write(p []byte) (int, error) {
 	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return 0, fmt.Errorf("broker returned status %d", resp.StatusCode)
+		return fmt.Errorf("broker returned status %d", resp.StatusCode)
 	}
-	return len(p), nil
+	return nil
 }
 
 // Close stops polling and sends DELETE /tunnel/{id} to the broker.
