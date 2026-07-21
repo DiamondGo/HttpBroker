@@ -59,53 +59,81 @@ func (p *BufferedPipe) Read(dst []byte) (int, error) {
 	return n, nil
 }
 
-// ReadAvailable reads whatever data is currently available without blocking.
-// If no data is available, waits up to timeout. Returns (0, nil) if timeout
-// expires with no data (caller should send an empty response).
-// Returns io.EOF if the pipe is closed and empty.
+// readCoalesceWindow bounds phase 2 of ReadAvailable (see below): once at
+// least one byte has arrived, how much longer to wait for more to
+// accumulate before flushing a response. Mirrors HTTPConn's
+// writeCoalesceWindow on the client side and the same reasoning: negligible
+// against a real long-poll round trip, but caps the worst case for a
+// near-zero-latency (e.g. same-host/LAN) deployment.
+const readCoalesceWindow = 2 * time.Millisecond
+
+// ReadAvailable reads whatever data is currently available, in two phases.
+//
+// Phase 1: if the pipe is empty, wait up to timeout for the first byte to
+// arrive (this is the actual long-poll wait — unchanged from before).
+//
+// Phase 2: once at least one byte is available, wait a further, much
+// shorter readCoalesceWindow for more to accumulate (capped by len(dst)),
+// instead of flushing immediately. Without this, a poll response goes out
+// the instant a single byte lands in the buffer — and since callers
+// (HTTPConn's poll loop) immediately re-poll after receiving any data, that
+// turns every small trickle of data into its own full round trip, never
+// letting dst's full capacity get used even though it's sitting right
+// there. This is the same class of fix as HTTPConn.Write's coalescing, but
+// for the download direction.
+//
+// Returns (0, nil) if timeout expires with no data at all (caller should
+// send an empty response). Returns io.EOF if the pipe is closed and empty.
 func (p *BufferedPipe) ReadAvailable(dst []byte, timeout time.Duration) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// If data is already available, return it immediately.
-	if len(p.buf) > 0 {
-		n := copy(dst, p.buf)
-		p.buf = p.buf[n:]
-		return n, nil
+	if len(p.buf) == 0 {
+		if p.closed {
+			return 0, io.EOF
+		}
+
+		// Phase 1: wait for the first byte (or timeout/close).
+		timedOut := false
+		timer := time.AfterFunc(timeout, func() {
+			p.mu.Lock()
+			timedOut = true
+			p.cond.Broadcast()
+			p.mu.Unlock()
+		})
+		for len(p.buf) == 0 && !p.closed && !timedOut {
+			p.cond.Wait()
+		}
+		timer.Stop()
+
+		if len(p.buf) == 0 {
+			if p.closed {
+				return 0, io.EOF
+			}
+			return 0, nil // pure timeout, no data at all
+		}
 	}
 
-	// If closed and empty, return EOF.
-	if p.closed {
-		return 0, io.EOF
+	// Phase 2: at least one byte is available. Give it a brief window to
+	// accumulate more before flushing, unless dst is already full or the
+	// pipe closed in the meantime.
+	if len(p.buf) < len(dst) && !p.closed {
+		timedOut := false
+		timer := time.AfterFunc(readCoalesceWindow, func() {
+			p.mu.Lock()
+			timedOut = true
+			p.cond.Broadcast()
+			p.mu.Unlock()
+		})
+		for len(p.buf) < len(dst) && !p.closed && !timedOut {
+			p.cond.Wait()
+		}
+		timer.Stop()
 	}
 
-	// No data available — wait up to timeout using a timer goroutine.
-	timedOut := false
-	timer := time.AfterFunc(timeout, func() {
-		p.mu.Lock()
-		timedOut = true
-		p.cond.Broadcast()
-		p.mu.Unlock()
-	})
-	defer timer.Stop()
-
-	for len(p.buf) == 0 && !p.closed && !timedOut {
-		p.cond.Wait()
-	}
-
-	// Check what woke us up.
-	if len(p.buf) > 0 {
-		n := copy(dst, p.buf)
-		p.buf = p.buf[n:]
-		return n, nil
-	}
-
-	if p.closed {
-		return 0, io.EOF
-	}
-
-	// Timeout expired with no data.
-	return 0, nil
+	n := copy(dst, p.buf)
+	p.buf = p.buf[n:]
+	return n, nil
 }
 
 // Close closes the pipe, unblocking any waiting readers.
