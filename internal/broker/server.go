@@ -23,6 +23,7 @@ type Config struct {
 	UseTLS                      bool
 	PollTimeout                 time.Duration // how long to hold poll before empty response (default 30s)
 	SessionTimeout              time.Duration // inactive session cleanup interval (default 5m)
+	CoalesceWindow              time.Duration // how long to let a poll response accumulate more data once any is available (default: transport.DefaultCoalesceWindow)
 	AuthEnabled                 bool          // whether authentication is enabled
 	AuthToken                   string        // authentication token (used when AuthEnabled is true)
 	StatusEndpointEnabled       bool          // whether to expose GET /status endpoint (default: false)
@@ -50,6 +51,9 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 	}
 	if config.SessionTimeout == 0 {
 		config.SessionTimeout = 5 * time.Minute
+	}
+	if config.CoalesceWindow == 0 {
+		config.CoalesceWindow = transport.DefaultCoalesceWindow
 	}
 
 	registry := NewEndpointRegistry()
@@ -279,7 +283,7 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 	)
 
 	buf := make([]byte, 64*1024) // 64KB read buffer
-	n, err := session.FromBroker.ReadAvailable(buf, s.config.PollTimeout)
+	n, err := session.FromBroker.ReadAvailable(buf, s.config.PollTimeout, s.config.CoalesceWindow)
 	if n > 0 {
 		s.logger.Debug("poll: returning data from FromBroker",
 			zap.String("session_id", sessionID),

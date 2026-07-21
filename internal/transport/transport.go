@@ -38,6 +38,9 @@ type HTTPConnector struct {
 	PollInterval time.Duration
 	HTTPClient   *http.Client
 	AuthToken    string // Optional bearer token for authentication
+	// WriteCoalesceWindow is passed through to NewHTTPConn; <= 0 uses
+	// DefaultCoalesceWindow.
+	WriteCoalesceWindow time.Duration
 }
 
 // connectResponse is the JSON response from POST /tunnel/connect.
@@ -109,6 +112,6 @@ func (c *HTTPConnector) Connect(brokerBaseURL, role, endpoint string) (Conn, err
 		return nil, fmt.Errorf("transport: broker returned empty session_id")
 	}
 
-	conn := NewHTTPConn(brokerBaseURL, cr.SessionID, c.PollInterval, c.HTTPClient, c.AuthToken)
+	conn := NewHTTPConn(brokerBaseURL, cr.SessionID, c.PollInterval, c.HTTPClient, c.AuthToken, c.WriteCoalesceWindow)
 	return conn, nil
 }

@@ -10,6 +10,10 @@ socks5:
 transport:
   poll_interval: "50ms"
   retry_backoff: "5s"
+  # coalesce_window: "2ms"  # how long Write() waits before the first send of
+                            # an idle-to-active burst, letting immediately-
+                            # following writes merge into one HTTP request.
+                            # Default 2ms if omitted.
 
 logging:
   level: "debug"

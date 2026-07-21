@@ -23,6 +23,9 @@ type Config struct {
 	ScrubHeaders       bool
 	InsecureSkipVerify bool   // Skip TLS certificate verification
 	AuthToken          string // Authentication token for broker
+	// CoalesceWindow is passed through to transport.HTTPConnector; <= 0 uses
+	// transport.DefaultCoalesceWindow.
+	CoalesceWindow time.Duration
 }
 
 // Client is the provider client.
@@ -77,9 +80,10 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		connector := &transport.HTTPConnector{
-			PollInterval: c.config.PollInterval,
-			HTTPClient:   httpClient,
-			AuthToken:    c.config.AuthToken,
+			PollInterval:        c.config.PollInterval,
+			HTTPClient:          httpClient,
+			AuthToken:           c.config.AuthToken,
+			WriteCoalesceWindow: c.config.CoalesceWindow,
 		}
 
 		c.logger.Info("connecting to broker",

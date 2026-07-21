@@ -85,6 +85,7 @@ func main() {
 				TLSKeyFile:                  cfg.Server.TLS.KeyFile,
 				PollTimeout:                 cfg.Tunnel.PollTimeout,
 				SessionTimeout:              cfg.Tunnel.SessionTimeout,
+				CoalesceWindow:              cfg.Tunnel.CoalesceWindow,
 				AuthEnabled:                 cfg.Auth.Enabled,
 				AuthToken:                   cfg.Auth.Token,
 				StatusEndpointEnabled:       cfg.Server.StatusEndpointEnabled,

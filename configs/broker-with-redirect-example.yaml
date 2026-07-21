@@ -18,6 +18,9 @@ server:
 tunnel:
   poll_timeout: "45s"
   session_timeout: "15m"
+  # coalesce_window: "2ms"  # how long a long-poll response waits for more data
+                            # to accumulate once any is available, instead of
+                            # flushing immediately. Default 2ms if omitted.
 
 auth:
   enabled: true

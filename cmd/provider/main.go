@@ -84,6 +84,7 @@ func main() {
 				ScrubHeaders:       cfg.Provider.ScrubHeaders,
 				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
 				AuthToken:          cfg.Broker.AuthToken,
+				CoalesceWindow:     cfg.Transport.CoalesceWindow,
 			}, logger)
 
 			logger.Info("starting provider",

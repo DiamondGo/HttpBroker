@@ -83,6 +83,7 @@ func main() {
 				RetryBackoff:       cfg.Transport.RetryBackoff,
 				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
 				AuthToken:          cfg.Broker.AuthToken,
+				CoalesceWindow:     cfg.Transport.CoalesceWindow,
 			}, logger)
 
 			logger.Info("starting consumer",

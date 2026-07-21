@@ -42,6 +42,12 @@ type UnauthorizedRedirectConfig struct {
 type TunnelConfig struct {
 	PollTimeout    time.Duration `mapstructure:"poll_timeout"`
 	SessionTimeout time.Duration `mapstructure:"session_timeout"`
+	// CoalesceWindow bounds how long the broker waits for more data to
+	// accumulate on a long-poll response once at least one byte is
+	// available, instead of flushing immediately (see
+	// transport.BufferedPipe.ReadAvailable). Zero/unset uses
+	// transport.DefaultCoalesceWindow (2ms).
+	CoalesceWindow time.Duration `mapstructure:"coalesce_window"`
 }
 
 // AuthConfig holds authentication settings.
@@ -80,6 +86,12 @@ type Socks5Config struct {
 type TransportConfig struct {
 	PollInterval time.Duration `mapstructure:"poll_interval"`
 	RetryBackoff time.Duration `mapstructure:"retry_backoff"`
+	// CoalesceWindow bounds how long Write() waits before the first send of
+	// an idle-to-active burst, giving immediately-following writes a chance
+	// to merge into the same HTTP request (see
+	// transport.HTTPConn.writeCoalesceWindow). Zero/unset uses
+	// transport.DefaultCoalesceWindow (2ms).
+	CoalesceWindow time.Duration `mapstructure:"coalesce_window"`
 }
 
 // ProviderConfig holds configuration for the provider (Machine C).

@@ -52,42 +52,46 @@ type HTTPConn struct {
 	// own HTTP request is fine on a near-zero-latency link, but once real
 	// network RTT is involved (e.g. through a public reverse proxy) it turns
 	// every tiny write into a full round trip and craters throughput. See
-	// writeCoalesceWindow below for why a short fixed window is used instead
-	// of a purely race-based (zero-wait) merge.
-	writeMu       sync.Mutex
-	writeBuf      []byte
-	writeFlightOn bool
+	// writeCoalesceWindow (set in NewHTTPConn) for why a short fixed window
+	// is used instead of a purely race-based (zero-wait) merge.
+	writeMu             sync.Mutex
+	writeBuf            []byte
+	writeFlightOn       bool
+	writeCoalesceWindow time.Duration
 }
-
-// writeCoalesceWindow is the delay before the *first* send of an idle-to-active
-// write burst, giving any immediately-following Write() calls (most reliably,
-// yamux's header+body pair for the same frame) a chance to land in the same
-// buffer and go out as a single HTTP request. It is paid once per burst, not
-// per Write() call: once a request is in flight, any further writes queue up
-// and are picked up on the next iteration with no additional wait. 2ms is
-// negligible against real WAN round trips (100ms+) but bounds the worst case
-// added latency for a near-zero-latency (e.g. same-host/LAN) deployment.
-const writeCoalesceWindow = 2 * time.Millisecond
 
 // NewHTTPConn creates an HTTPConn and starts the background poll goroutine.
 // pollInterval is the minimum time to wait between polls when no data is available.
 // The actual long-poll timeout is controlled by the broker's poll_timeout configuration.
 // httpClient is the HTTP client to use for all requests (allows custom TLS config).
 // authToken is the optional bearer token for authentication.
-func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration, httpClient *http.Client, authToken string) *HTTPConn {
+// writeCoalesceWindow is the delay before the *first* send of an idle-to-active
+// write burst, giving any immediately-following Write() calls (most reliably,
+// yamux's header+body pair for the same frame) a chance to land in the same
+// buffer and go out as a single HTTP request. It is paid once per burst, not
+// per Write() call: once a request is in flight, any further writes queue up
+// and are picked up on the next iteration with no additional wait. Pass <= 0
+// to use DefaultCoalesceWindow (2ms) — negligible against real WAN round
+// trips (100ms+) but bounds the worst case added latency for a
+// near-zero-latency (e.g. same-host/LAN) deployment.
+func NewHTTPConn(brokerBaseURL, sessionID string, pollInterval time.Duration, httpClient *http.Client, authToken string, writeCoalesceWindow time.Duration) *HTTPConn {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 0}
 	}
+	if writeCoalesceWindow <= 0 {
+		writeCoalesceWindow = DefaultCoalesceWindow
+	}
 
 	c := &HTTPConn{
-		sessionID:         sessionID,
-		pollURL:           fmt.Sprintf("%s/tunnel/%s/poll", brokerBaseURL, sessionID),
-		deleteURL:         fmt.Sprintf("%s/tunnel/%s", brokerBaseURL, sessionID),
-		httpClient:        httpClient,
-		authToken:         authToken,
-		readPipe:          NewBufferedPipe(),
-		transportFailedCh: make(chan struct{}),
-		stopCh:            make(chan struct{}),
+		sessionID:           sessionID,
+		pollURL:             fmt.Sprintf("%s/tunnel/%s/poll", brokerBaseURL, sessionID),
+		deleteURL:           fmt.Sprintf("%s/tunnel/%s", brokerBaseURL, sessionID),
+		httpClient:          httpClient,
+		authToken:           authToken,
+		readPipe:            NewBufferedPipe(),
+		transportFailedCh:   make(chan struct{}),
+		stopCh:              make(chan struct{}),
+		writeCoalesceWindow: writeCoalesceWindow,
 	}
 
 	c.wg.Add(1)
@@ -161,7 +165,7 @@ func (c *HTTPConn) flushLoop() {
 	first := true
 	for {
 		if first {
-			time.Sleep(writeCoalesceWindow)
+			time.Sleep(c.writeCoalesceWindow)
 			first = false
 		}
 

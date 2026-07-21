@@ -59,13 +59,11 @@ func (p *BufferedPipe) Read(dst []byte) (int, error) {
 	return n, nil
 }
 
-// readCoalesceWindow bounds phase 2 of ReadAvailable (see below): once at
-// least one byte has arrived, how much longer to wait for more to
-// accumulate before flushing a response. Mirrors HTTPConn's
-// writeCoalesceWindow on the client side and the same reasoning: negligible
-// against a real long-poll round trip, but caps the worst case for a
-// near-zero-latency (e.g. same-host/LAN) deployment.
-const readCoalesceWindow = 2 * time.Millisecond
+// DefaultCoalesceWindow is used by both the read side (ReadAvailable's
+// phase 2, below) and the write side (HTTPConn.Write) whenever the caller
+// hasn't configured an explicit value. See TunnelConfig.CoalesceWindow and
+// TransportConfig.CoalesceWindow.
+const DefaultCoalesceWindow = 2 * time.Millisecond
 
 // ReadAvailable reads whatever data is currently available, in two phases.
 //
@@ -73,18 +71,23 @@ const readCoalesceWindow = 2 * time.Millisecond
 // arrive (this is the actual long-poll wait — unchanged from before).
 //
 // Phase 2: once at least one byte is available, wait a further, much
-// shorter readCoalesceWindow for more to accumulate (capped by len(dst)),
+// shorter coalesceWindow for more to accumulate (capped by len(dst)),
 // instead of flushing immediately. Without this, a poll response goes out
 // the instant a single byte lands in the buffer — and since callers
 // (HTTPConn's poll loop) immediately re-poll after receiving any data, that
 // turns every small trickle of data into its own full round trip, never
 // letting dst's full capacity get used even though it's sitting right
 // there. This is the same class of fix as HTTPConn.Write's coalescing, but
-// for the download direction.
+// for the download direction. Pass coalesceWindow <= 0 to use
+// DefaultCoalesceWindow.
 //
 // Returns (0, nil) if timeout expires with no data at all (caller should
 // send an empty response). Returns io.EOF if the pipe is closed and empty.
-func (p *BufferedPipe) ReadAvailable(dst []byte, timeout time.Duration) (int, error) {
+func (p *BufferedPipe) ReadAvailable(dst []byte, timeout time.Duration, coalesceWindow time.Duration) (int, error) {
+	if coalesceWindow <= 0 {
+		coalesceWindow = DefaultCoalesceWindow
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -119,7 +122,7 @@ func (p *BufferedPipe) ReadAvailable(dst []byte, timeout time.Duration) (int, er
 	// pipe closed in the meantime.
 	if len(p.buf) < len(dst) && !p.closed {
 		timedOut := false
-		timer := time.AfterFunc(readCoalesceWindow, func() {
+		timer := time.AfterFunc(coalesceWindow, func() {
 			p.mu.Lock()
 			timedOut = true
 			p.cond.Broadcast()

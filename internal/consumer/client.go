@@ -24,6 +24,9 @@ type Config struct {
 	RetryBackoff       time.Duration
 	InsecureSkipVerify bool   // Skip TLS certificate verification
 	AuthToken          string // Authentication token for broker
+	// CoalesceWindow is passed through to transport.HTTPConnector; <= 0 uses
+	// transport.DefaultCoalesceWindow.
+	CoalesceWindow time.Duration
 }
 
 // Client is the consumer client.
@@ -231,9 +234,10 @@ func (c *Client) connectToBroker() (transport.Conn, error) {
 	}
 
 	connector := &transport.HTTPConnector{
-		PollInterval: c.config.PollInterval,
-		HTTPClient:   httpClient,
-		AuthToken:    c.config.AuthToken,
+		PollInterval:        c.config.PollInterval,
+		HTTPClient:          httpClient,
+		AuthToken:           c.config.AuthToken,
+		WriteCoalesceWindow: c.config.CoalesceWindow,
 	}
 
 	return connector.Connect(c.config.BrokerURL, "consumer", c.config.Endpoint)
