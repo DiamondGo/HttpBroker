@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -87,7 +89,10 @@ func main() {
 			logger.Info("starting provider",
 				zap.String("broker", cfg.Broker.URL),
 				zap.String("endpoint", cfg.Broker.Endpoint))
-			return client.Run(ctx)
+			if err := client.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				return err
+			}
+			return nil
 		},
 	}
 

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -106,7 +108,10 @@ func main() {
 			}()
 
 			logger.Info("starting broker", zap.String("listen", brokerCfg.ListenAddr))
-			return srv.Start()
+			if err := srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
 		},
 	}
 
