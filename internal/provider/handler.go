@@ -93,6 +93,7 @@ func (h *StreamHandler) Handle(stream net.Conn) {
 	go func() {
 		defer wg.Done()
 		io.Copy(stream, targetConn)
+		stream.Close() // Propagate EOF back to the tunnel
 	}()
 
 	// Wait for both directions to finish.

@@ -3,6 +3,7 @@ package broker
 import (
 	"io"
 	"net"
+	"sync"
 
 	"github.com/DiamondGo/pollmux"
 	"go.uber.org/zap"
@@ -215,21 +216,9 @@ func (r *Relay) bridgeStream(
 	}
 
 	// Step 5: Bridge with bidirectional io.Copy.
-	errCh := make(chan error, 2)
-
-	go func() {
-		_, err := io.Copy(providerStream, consumerStream)
-		errCh <- err
-	}()
-
-	go func() {
-		_, err := io.Copy(consumerStream, providerStream)
-		errCh <- err
-	}()
-
-	// Wait for both directions to finish.
-	for i := 0; i < 2; i++ {
-		if err := <-errCh; err != nil && err != io.EOF {
+	errConsumerToProvider, errProviderToConsumer := bridgeConns(providerStream, consumerStream)
+	for _, err := range [...]error{errConsumerToProvider, errProviderToConsumer} {
+		if err != nil && err != io.EOF {
 			r.logger.Debug("bridge stream copy error",
 				zap.String("endpoint", endpointName),
 				zap.String("target", targetAddr),
@@ -242,4 +231,35 @@ func (r *Relay) bridgeStream(
 		zap.String("endpoint", endpointName),
 		zap.String("target", targetAddr),
 	)
+}
+
+// bridgeConns copies data bidirectionally between a and b until both
+// directions finish, then reports each direction's io.Copy error.
+//
+// Each goroutine closes only the connection it writes to, once its own
+// copy completes — never the connection owned by the other goroutine.
+// Closing the other connection would race its still-in-progress Write
+// calls (e.g. when one side has half-closed its write direction but is
+// still receiving a large/streamed response from the other), truncating
+// data that was never actually finished relaying.
+func bridgeConns(a, b net.Conn) (errBtoA error, errAtoB error) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		_, err := io.Copy(a, b)
+		a.Close()
+		errBtoA = err
+	}()
+
+	go func() {
+		defer wg.Done()
+		_, err := io.Copy(b, a)
+		b.Close()
+		errAtoB = err
+	}()
+
+	wg.Wait()
+	return errBtoA, errAtoB
 }
