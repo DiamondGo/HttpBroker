@@ -13,11 +13,14 @@ server:
     url: ""         # Example: "/login", "www.example.com", or "https://example.com"
 
 tunnel:
-  poll_timeout: "45s"
-  session_timeout: "15m"
+  poll_timeout: "30s"
+  session_timeout: "60s"   # must be >= 2x poll_timeout, or the broker panics at startup
   # coalesce_window: "2ms"  # how long a long-poll response waits for more data
                             # to accumulate once any is available, instead of
                             # flushing immediately. Default 2ms if omitted.
+  # poll_buffer_size: 262144  # bytes per long-poll response. Default 256KiB if omitted.
+  # max_send_bytes: 1048576   # cap on a single request body. Default 1MiB if omitted.
+  # high_water_warn: 0        # log once when a session buffers this many bytes. 0 disables.
 
 auth:
   enabled: true

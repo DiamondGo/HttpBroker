@@ -2,17 +2,16 @@ package broker
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/DiamondGo/HttpBroker/internal/transport"
+	"github.com/DiamondGo/pollmux"
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
+	"go.uber.org/zap/exp/zapslog"
 )
 
 // Config holds broker server configuration.
@@ -22,8 +21,11 @@ type Config struct {
 	TLSKeyFile                  string
 	UseTLS                      bool
 	PollTimeout                 time.Duration // how long to hold poll before empty response (default 30s)
-	SessionTimeout              time.Duration // inactive session cleanup interval (default 5m)
-	CoalesceWindow              time.Duration // how long to let a poll response accumulate more data once any is available (default: transport.DefaultCoalesceWindow)
+	SessionTimeout              time.Duration // inactive session cleanup interval (default 60s; must be >= 2x PollTimeout)
+	CoalesceWindow              time.Duration // how long to let a poll response accumulate more data once any is available (default: pollmux.DefaultCoalesceWindow)
+	PollBufferSize              int           // bytes per long-poll response (default: pollmux.DefaultPollBufferSize, 256KiB)
+	MaxSendBytes                int           // cap on a single request body (default: pollmux.DefaultMaxSendBytes, 1MiB)
+	HighWaterWarn               int           // log once when a session buffers this many bytes; 0 disables
 	AuthEnabled                 bool          // whether authentication is enabled
 	AuthToken                   string        // authentication token (used when AuthEnabled is true)
 	StatusEndpointEnabled       bool          // whether to expose GET /status endpoint (default: false)
@@ -32,40 +34,61 @@ type Config struct {
 	Version                     string        // broker version
 }
 
+// brokerSession pairs a pollmux.Session with the role/endpoint declared at
+// connect time. pollmux itself carries no application semantics, so the
+// registry and relay key off these two fields instead of Meta directly.
+type brokerSession struct {
+	*pollmux.Session
+	Role     string
+	Endpoint string
+}
+
 // Server is the broker HTTP server.
 type Server struct {
-	config   Config
-	registry *EndpointRegistry
-	relay    *Relay
-	logger   *zap.Logger
-	httpSrv  *http.Server
-	done     chan struct{} // signals cleanup goroutine to stop
-	stopOnce sync.Once     // ensures Stop() is idempotent
-	version  string        // broker version
+	config      Config
+	registry    *EndpointRegistry
+	relay       *Relay
+	logger      *zap.Logger
+	httpSrv     *http.Server
+	store       *pollmux.SessionStore
+	pcfg        pollmux.ServerConfig
+	hooks       pollmux.Hooks
+	stopSweeper func()
+	stopOnce    sync.Once // ensures Stop() is idempotent
+	version     string    // broker version
 }
 
 // NewServer creates a new broker Server.
 func NewServer(config Config, logger *zap.Logger) *Server {
-	if config.PollTimeout == 0 {
-		config.PollTimeout = 30 * time.Second
-	}
-	if config.SessionTimeout == 0 {
-		config.SessionTimeout = 5 * time.Minute
-	}
-	if config.CoalesceWindow == 0 {
-		config.CoalesceWindow = transport.DefaultCoalesceWindow
-	}
-
 	registry := NewEndpointRegistry()
 	relay := NewRelay(registry, logger)
+	store := pollmux.NewSessionStore()
+	slogger := slog.New(zapslog.NewHandler(logger.Core()))
 
 	s := &Server{
 		config:   config,
 		registry: registry,
 		relay:    relay,
 		logger:   logger,
-		done:     make(chan struct{}),
+		store:    store,
 		version:  config.Version,
+	}
+
+	s.pcfg = pollmux.ServerConfig{
+		PollTimeout:    config.PollTimeout,
+		SessionTimeout: config.SessionTimeout,
+		CoalesceWindow: config.CoalesceWindow,
+		PollBufferSize: config.PollBufferSize,
+		MaxSendBytes:   config.MaxSendBytes,
+		HighWaterWarn:  config.HighWaterWarn,
+		// This project uses gorilla/mux, not net/http's own router.
+		SessionIDFunc: func(r *http.Request) string { return mux.Vars(r)["id"] },
+		Logger:        slogger,
+	}
+	s.hooks = pollmux.Hooks{
+		Authenticate: s.authenticateConnect,
+		OnConnect:    s.onConnect,
+		OnDisconnect: s.onDisconnect,
 	}
 
 	router := mux.NewRouter()
@@ -85,11 +108,17 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		logger.Info("authentication disabled")
 	}
 
-	router.Handle("/tunnel/connect", AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL, http.HandlerFunc(s.handleConnect))).
+	router.Handle("/tunnel/connect",
+		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
+			pollmux.ConnectHandler(store, s.pcfg, s.hooks))).
 		Methods("POST")
-	router.Handle("/tunnel/{id}/poll", AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL, http.HandlerFunc(s.handlePoll))).
+	router.Handle("/tunnel/{id}/poll",
+		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
+			pollmux.PollHandler(store, s.pcfg, s.hooks))).
 		Methods("POST")
-	router.Handle("/tunnel/{id}", AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL, http.HandlerFunc(s.handleDelete))).
+	router.Handle("/tunnel/{id}",
+		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
+			pollmux.DeleteHandler(store, s.pcfg, s.hooks))).
 		Methods("DELETE")
 
 	// Conditionally register /status endpoint based on configuration
@@ -116,10 +145,62 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 	return s
 }
 
-// Start starts the HTTP server and the session cleanup goroutine.
+// authenticateConnect vets the role/endpoint declared in a connect request's
+// meta. Bearer token validation happens earlier in AuthMiddleware; this hook
+// only concerns itself with the business fields pollmux itself doesn't know
+// about.
+func (s *Server) authenticateConnect(
+	r *http.Request, req pollmux.ConnectRequest,
+) (map[string]string, error) {
+	role, endpoint := req.Meta["role"], req.Meta["endpoint"]
+	if role == "" || endpoint == "" {
+		return nil, pollmux.StatusErrorf(http.StatusBadRequest,
+			"meta must carry both role and endpoint")
+	}
+	if role != "consumer" && role != "provider" {
+		return nil, pollmux.StatusErrorf(http.StatusBadRequest,
+			"role must be 'consumer' or 'provider', got %q", role)
+	}
+	return nil, nil
+}
+
+// onConnect runs after the session is already registered in the store, so
+// there's no race where an early poll finds no session and gets a 404.
+func (s *Server) onConnect(sess *pollmux.Session, meta map[string]string) error {
+	bs := &brokerSession{Session: sess, Role: meta["role"], Endpoint: meta["endpoint"]}
+
+	if bs.Role == "provider" {
+		go s.relay.HandleProvider(bs)
+	} else {
+		s.registry.AddConsumer(bs.Endpoint, bs)
+		go s.relay.HandleConsumer(bs)
+	}
+
+	s.logger.Info("session created",
+		zap.String("session_id", bs.ID),
+		zap.String("role", bs.Role),
+		zap.String("endpoint", bs.Endpoint),
+	)
+	return nil
+}
+
+// onDisconnect is the single exit point for a session's end, whatever
+// triggered it (client DELETE, sweeper eviction, or server-initiated close).
+func (s *Server) onDisconnect(sess *pollmux.Session, reason pollmux.DisconnectReason) {
+	meta := sess.Meta()
+	s.registry.Forget(sess.ID, meta["role"], meta["endpoint"])
+	s.logger.Info("session ended",
+		zap.String("session_id", sess.ID),
+		zap.String("role", meta["role"]),
+		zap.String("endpoint", meta["endpoint"]),
+		zap.String("reason", reason.String()),
+	)
+}
+
+// Start starts the HTTP server and the session sweeper.
 // Blocks until the server stops.
 func (s *Server) Start() error {
-	go s.cleanupLoop()
+	s.stopSweeper = pollmux.StartSweeper(s.store, s.pcfg, s.hooks)
 
 	s.logger.Info("broker server starting", zap.String("addr", s.config.ListenAddr))
 
@@ -133,195 +214,35 @@ func (s *Server) Start() error {
 //
 // Shutdown sequence:
 //  1. Stop the HTTP server (no new requests accepted; in-flight requests drain).
-//  2. Close all active sessions so HandleProvider/HandleConsumer goroutines exit.
-//     Closing a session closes its BufferedPipes, causing yamux to get EOF and
-//     close, which unblocks CloseChan() and Accept() in the relay goroutines.
-//     Connected consumers and providers will detect the closure and reconnect.
-//  3. Stop the session cleanup goroutine.
+//  2. Close every live session so relay goroutines exit cleanly and connected
+//     consumers/providers detect the closure and reconnect.
+//  3. Stop the sweeper. It returns only once its goroutine has exited, so no
+//     further OnDisconnect calls arrive after Stop returns.
 func (s *Server) Stop(ctx context.Context) error {
 	var err error
 	s.stopOnce.Do(func() {
 		s.logger.Info("broker shutting down — draining HTTP connections and closing all sessions")
 
-		// 1. Stop accepting new HTTP connections and drain in-flight requests.
 		err = s.httpSrv.Shutdown(ctx)
 
-		// 2. Close all active sessions so relay goroutines exit cleanly.
-		//    This notifies connected consumers and providers that the broker is gone.
-		for _, session := range s.registry.AllSessions() {
-			session.Close()
+		for _, sess := range s.store.All() {
+			pollmux.CloseSession(s.store, s.hooks, sess, pollmux.ReasonServerClose)
 		}
 
-		// 3. Stop the cleanup goroutine.
-		close(s.done)
+		if s.stopSweeper != nil {
+			s.stopSweeper()
+		}
 
 		s.logger.Info("broker shutdown complete")
 	})
 	return err
 }
 
-// generateSessionID generates a random 32-character hex string.
-func generateSessionID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
 // writeJSON writes a JSON response with the given status code.
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
-}
-
-// writeError writes a JSON error response.
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// handleConnect handles POST /tunnel/connect.
-func (s *Server) handleConnect(w http.ResponseWriter, r *http.Request) {
-	role := r.URL.Query().Get("role")
-	endpoint := r.URL.Query().Get("endpoint")
-
-	if role == "" || endpoint == "" {
-		writeError(w, http.StatusBadRequest, "missing required query params: role, endpoint")
-		return
-	}
-
-	if role != "consumer" && role != "provider" {
-		writeError(w, http.StatusBadRequest, "role must be 'consumer' or 'provider'")
-		return
-	}
-
-	sessionID, err := generateSessionID()
-	if err != nil {
-		s.logger.Error("failed to generate session ID", zap.Error(err))
-		writeError(w, http.StatusInternalServerError, "failed to generate session ID")
-		return
-	}
-
-	session := transport.NewSession(sessionID, role, endpoint)
-
-	if role == "provider" {
-		// Pre-register session so handlePoll can find it immediately.
-		// Without this, polls arriving before HandleProvider calls SetProvider
-		// would get 404 (race condition that caused persistent polling failures).
-		s.registry.RegisterSession(session)
-		go s.relay.HandleProvider(session)
-	} else {
-		s.registry.AddConsumer(endpoint, session)
-		go s.relay.HandleConsumer(session)
-	}
-
-	s.logger.Info("session created",
-		zap.String("session_id", sessionID),
-		zap.String("role", role),
-		zap.String("endpoint", endpoint),
-	)
-
-	writeJSON(w, http.StatusOK, map[string]string{"session_id": sessionID})
-}
-
-// handlePoll handles POST /tunnel/{id}/poll.
-//
-// This endpoint now supports two modes:
-//  1. Send-only (X-Send-Only: true): Immediately sends data to ToBroker and returns 200 OK.
-//     Used by HTTPConn.Write() for immediate data transmission.
-//  2. Receive-only (X-Receive-Only: true): Long-polls FromBroker for data to send back.
-//     Used by HTTPConn.pollLoop() for continuous data reception.
-func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	sessionID := vars["id"]
-
-	session, ok := s.registry.GetSession(sessionID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	session.Touch()
-
-	sendOnly := r.Header.Get("X-Send-Only") == "true"
-	receiveOnly := r.Header.Get("X-Receive-Only") == "true"
-
-	// Read request body and write to session's ToBroker pipe (if body not empty).
-	// Limit body to 1MB.
-	body := http.MaxBytesReader(w, r.Body, 1<<20)
-	data, err := io.ReadAll(body)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-
-	if len(data) > 0 {
-		s.logger.Debug("poll: writing data to ToBroker",
-			zap.String("session_id", sessionID),
-			zap.Int("bytes", len(data)),
-			zap.Bool("send_only", sendOnly),
-		)
-		if _, err := session.ToBroker.Write(data); err != nil {
-			s.logger.Debug("failed to write to ToBroker pipe",
-				zap.String("session_id", sessionID),
-				zap.Error(err),
-			)
-		}
-	}
-
-	// If this is a send-only request, return immediately without waiting for data
-	if sendOnly {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	// Read from session's FromBroker pipe using ReadAvailable (long-polling).
-	s.logger.Debug("poll: long-polling FromBroker",
-		zap.String("session_id", sessionID),
-		zap.Bool("receive_only", receiveOnly),
-	)
-
-	buf := make([]byte, 64*1024) // 64KB read buffer
-	n, err := session.FromBroker.ReadAvailable(buf, s.config.PollTimeout, s.config.CoalesceWindow)
-	if n > 0 {
-		s.logger.Debug("poll: returning data from FromBroker",
-			zap.String("session_id", sessionID),
-			zap.Int("bytes", n),
-		)
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.WriteHeader(http.StatusOK)
-		w.Write(buf[:n])
-		return
-	}
-
-	if err == io.EOF {
-		// Session pipe closed.
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	// Timeout with no data.
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// handleDelete handles DELETE /tunnel/{id}.
-func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	sessionID := vars["id"]
-
-	session, ok := s.registry.GetSession(sessionID)
-	if !ok {
-		writeError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	session.Close()
-	s.registry.RemoveSession(sessionID)
-
-	s.logger.Info("session deleted", zap.String("session_id", sessionID))
-
-	w.WriteHeader(http.StatusOK)
 }
 
 // endpointStatus is the JSON representation of an endpoint's status.
@@ -334,8 +255,6 @@ type endpointStatus struct {
 // handleStatus handles GET /status.
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.registry.mu.RLock()
-	defer s.registry.mu.RUnlock()
-
 	statuses := make([]endpointStatus, 0, len(s.registry.endpoints))
 
 	for name, ep := range s.registry.endpoints {
@@ -350,10 +269,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			ConsumerCount: consumerCount,
 		})
 	}
+	s.registry.mu.RUnlock()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"version":   s.version,
-		"endpoints": statuses,
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":        s.version,
+		"endpoints":      statuses,
+		"total_sessions": s.store.Len(),
 	})
 }
 
@@ -362,35 +283,4 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUnauthorizedRedirect(w http.ResponseWriter, r *http.Request) {
 	targetURL := buildRedirectURL(s.config.UnauthorizedRedirectURL, r)
 	http.Redirect(w, r, targetURL, http.StatusFound)
-}
-
-// cleanupLoop periodically removes expired sessions.
-func (s *Server) cleanupLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-ticker.C:
-			s.cleanupExpiredSessions()
-		}
-	}
-}
-
-// cleanupExpiredSessions removes all expired sessions.
-func (s *Server) cleanupExpiredSessions() {
-	sessions := s.registry.AllSessions()
-	for _, session := range sessions {
-		if session.IsExpired(s.config.SessionTimeout) {
-			s.logger.Info("cleaning up expired session",
-				zap.String("session_id", session.ID),
-				zap.String("role", session.Role),
-				zap.String("endpoint", session.Endpoint),
-			)
-			session.Close()
-			s.registry.RemoveSession(session.ID)
-		}
-	}
 }

@@ -44,10 +44,18 @@ type TunnelConfig struct {
 	SessionTimeout time.Duration `mapstructure:"session_timeout"`
 	// CoalesceWindow bounds how long the broker waits for more data to
 	// accumulate on a long-poll response once at least one byte is
-	// available, instead of flushing immediately (see
-	// transport.BufferedPipe.ReadAvailable). Zero/unset uses
-	// transport.DefaultCoalesceWindow (2ms).
+	// available, instead of flushing immediately. Zero/unset uses
+	// pollmux.DefaultCoalesceWindow (2ms).
 	CoalesceWindow time.Duration `mapstructure:"coalesce_window"`
+	// PollBufferSize caps how many bytes one poll response may carry.
+	// Zero/unset uses pollmux.DefaultPollBufferSize (256KiB).
+	PollBufferSize int `mapstructure:"poll_buffer_size"`
+	// MaxSendBytes caps a single request body. Zero/unset uses
+	// pollmux.DefaultMaxSendBytes (1MiB).
+	MaxSendBytes int `mapstructure:"max_send_bytes"`
+	// HighWaterWarn logs a one-shot warning when either direction of a
+	// session buffers this many bytes. Zero disables it.
+	HighWaterWarn int `mapstructure:"high_water_warn"`
 }
 
 // AuthConfig holds authentication settings.
@@ -86,11 +94,10 @@ type Socks5Config struct {
 type TransportConfig struct {
 	PollInterval time.Duration `mapstructure:"poll_interval"`
 	RetryBackoff time.Duration `mapstructure:"retry_backoff"`
-	// CoalesceWindow bounds how long Write() waits before the first send of
-	// an idle-to-active burst, giving immediately-following writes a chance
-	// to merge into the same HTTP request (see
-	// transport.HTTPConn.writeCoalesceWindow). Zero/unset uses
-	// transport.DefaultCoalesceWindow (2ms).
+	// CoalesceWindow bounds how long pollmux.Connector's Write() waits before
+	// the first send of an idle-to-active burst, giving immediately-following
+	// writes a chance to merge into the same HTTP request. Zero/unset uses
+	// pollmux.DefaultCoalesceWindow (2ms).
 	CoalesceWindow time.Duration `mapstructure:"coalesce_window"`
 }
 

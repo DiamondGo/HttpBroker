@@ -4,8 +4,7 @@ import (
 	"io"
 	"net"
 
-	"github.com/DiamondGo/HttpBroker/internal/transport"
-	"github.com/hashicorp/yamux"
+	"github.com/DiamondGo/pollmux"
 	"go.uber.org/zap"
 )
 
@@ -26,7 +25,7 @@ func NewRelay(registry *EndpointRegistry, logger *zap.Logger) *Relay {
 // HandleProvider sets up yamux on the provider session and registers it.
 // Blocks until the provider disconnects, then closes all consumer yamux sessions
 // for this endpoint so consumers detect the failure immediately.
-func (r *Relay) HandleProvider(session *transport.Session) {
+func (r *Relay) HandleProvider(session *brokerSession) {
 	consumerCount := r.registry.ConsumerCount(session.Endpoint)
 	r.logger.Info("provider connected",
 		zap.String("session_id", session.ID),
@@ -35,13 +34,7 @@ func (r *Relay) HandleProvider(session *transport.Session) {
 	)
 
 	// Provider connection: broker is yamux client (opens streams TO provider).
-	// Disable keepalives: the HTTP polling transport cannot reliably complete a
-	// PING-PONG round-trip within yamux's ConnectionWriteTimeout (10s) when a
-	// long-poll is in flight. Provider reconnects automatically on failure.
-	yamuxCfg := yamux.DefaultConfig()
-	yamuxCfg.EnableKeepAlive = false
-	yamuxCfg.LogOutput = io.Discard
-	yamuxSess, err := yamux.Client(session, yamuxCfg)
+	yamuxSess, err := pollmux.ClientSession(session)
 	if err != nil {
 		r.logger.Error("failed to create yamux client session for provider",
 			zap.String("session_id", session.ID),
@@ -80,7 +73,7 @@ func (r *Relay) HandleProvider(session *transport.Session) {
 
 // HandleConsumer sets up yamux on the consumer session and starts accepting streams.
 // Blocks until the consumer disconnects.
-func (r *Relay) HandleConsumer(session *transport.Session) {
+func (r *Relay) HandleConsumer(session *brokerSession) {
 	hasProvider := r.registry.HasProvider(session.Endpoint)
 	r.logger.Info("consumer connected",
 		zap.String("session_id", session.ID),
@@ -95,12 +88,8 @@ func (r *Relay) HandleConsumer(session *transport.Session) {
 	}
 
 	// Consumer connection: broker is yamux server (accepts streams FROM consumer).
-	// Disable keepalives for the same reason as the provider session above.
-	yamuxCfgC := yamux.DefaultConfig()
-	yamuxCfgC.EnableKeepAlive = false
-	yamuxCfgC.LogOutput = io.Discard
 	r.logger.Debug("creating yamux server session for consumer")
-	yamuxSess, err := yamux.Server(session, yamuxCfgC)
+	yamuxSess, err := pollmux.ServerSession(session)
 	if err != nil {
 		r.logger.Error("failed to create yamux server session for consumer",
 			zap.String("session_id", session.ID),
@@ -230,19 +219,11 @@ func (r *Relay) bridgeStream(
 
 	go func() {
 		_, err := io.Copy(providerStream, consumerStream)
-		// Close write side of provider stream to signal EOF.
-		if closeWriter, ok := providerStream.(interface{ CloseWrite() error }); ok {
-			closeWriter.CloseWrite()
-		}
 		errCh <- err
 	}()
 
 	go func() {
 		_, err := io.Copy(consumerStream, providerStream)
-		// Close write side of consumer stream to signal EOF.
-		if closeWriter, ok := consumerStream.(interface{ CloseWrite() error }); ok {
-			closeWriter.CloseWrite()
-		}
 		errCh <- err
 	}()
 

@@ -93,10 +93,6 @@ func (h *StreamHandler) Handle(stream net.Conn) {
 	go func() {
 		defer wg.Done()
 		io.Copy(stream, targetConn)
-		// Signal stream that no more data is coming from this direction.
-		if closeWriter, ok := stream.(interface{ CloseWrite() error }); ok {
-			closeWriter.CloseWrite()
-		}
 	}()
 
 	// Wait for both directions to finish.

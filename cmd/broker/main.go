@@ -59,16 +59,9 @@ func main() {
 			if cfg.Server.Listen == "" {
 				cfg.Server.Listen = ":8080"
 			}
-			if cfg.Tunnel.PollTimeout == 0 {
-				// 1s allows yamux frames (including keepalive PING-PONG) to be
-				// delivered in time. A 30s long-poll would block the HTTPConn poll
-				// loop, preventing pending yamux frames in writeBuf from being sent
-				// for up to 30s — causing curl timeouts and yamux keepalive failures.
-				cfg.Tunnel.PollTimeout = 1 * time.Second
-			}
-			if cfg.Tunnel.SessionTimeout == 0 {
-				cfg.Tunnel.SessionTimeout = 5 * time.Minute
-			}
+			// PollTimeout/SessionTimeout/PollBufferSize/MaxSendBytes/HighWaterWarn
+			// are left at zero when unset in config — pollmux.ServerConfig falls
+			// back to its own documented defaults for each.
 
 			// Create logger
 			logger, err := config.NewLogger(cfg.Logging.Level)
@@ -86,6 +79,9 @@ func main() {
 				PollTimeout:                 cfg.Tunnel.PollTimeout,
 				SessionTimeout:              cfg.Tunnel.SessionTimeout,
 				CoalesceWindow:              cfg.Tunnel.CoalesceWindow,
+				PollBufferSize:              cfg.Tunnel.PollBufferSize,
+				MaxSendBytes:                cfg.Tunnel.MaxSendBytes,
+				HighWaterWarn:               cfg.Tunnel.HighWaterWarn,
 				AuthEnabled:                 cfg.Auth.Enabled,
 				AuthToken:                   cfg.Auth.Token,
 				StatusEndpointEnabled:       cfg.Server.StatusEndpointEnabled,

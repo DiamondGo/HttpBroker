@@ -5,16 +5,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/DiamondGo/HttpBroker/internal/transport"
 	"github.com/hashicorp/yamux"
 )
 
 // Endpoint represents a named proxy endpoint with one provider and N consumers.
 type Endpoint struct {
 	Name             string
-	ProviderSession  *transport.Session            // nil if no provider connected
-	ProviderYamux    *yamux.Session                // yamux client toward provider
-	ConsumerSessions map[string]*transport.Session // session ID -> consumer session
+	ProviderSession  *brokerSession            // nil if no provider connected
+	ProviderYamux    *yamux.Session            // yamux client toward provider
+	ConsumerSessions map[string]*brokerSession // session ID -> consumer session
 
 	// consumerYamuxSessions tracks all active consumer yamux sessions for this
 	// endpoint so that when the provider disconnects we can close them all,
@@ -25,18 +24,19 @@ type Endpoint struct {
 	cond *sync.Cond // broadcast when provider connects or disconnects
 }
 
-// EndpointRegistry manages all named endpoints.
+// EndpointRegistry manages all named endpoints. Session lifecycle (creation,
+// lookup, expiry) is entirely owned by pollmux.SessionStore; this registry is
+// a derived topology view — which endpoint has a provider, which consumers
+// are attached — updated from the connect/disconnect hooks.
 type EndpointRegistry struct {
 	mu        sync.RWMutex
 	endpoints map[string]*Endpoint
-	sessions  map[string]*transport.Session // session ID → session (all sessions)
 }
 
 // NewEndpointRegistry creates a new empty EndpointRegistry.
 func NewEndpointRegistry() *EndpointRegistry {
 	return &EndpointRegistry{
 		endpoints: make(map[string]*Endpoint),
-		sessions:  make(map[string]*transport.Session),
 	}
 }
 
@@ -51,7 +51,7 @@ func (r *EndpointRegistry) GetOrCreate(name string) *Endpoint {
 
 	ep := &Endpoint{
 		Name:                  name,
-		ConsumerSessions:      make(map[string]*transport.Session),
+		ConsumerSessions:      make(map[string]*brokerSession),
 		consumerYamuxSessions: make(map[string]*yamux.Session),
 	}
 	// cond uses its own dedicated mutex so it doesn't conflict with ep.mu.
@@ -64,25 +64,15 @@ func (r *EndpointRegistry) GetOrCreate(name string) *Endpoint {
 // Returns error if a provider is already registered.
 func (r *EndpointRegistry) SetProvider(
 	endpointName string,
-	session *transport.Session,
+	session *brokerSession,
 	yamuxSess *yamux.Session,
 ) error {
 	ep := r.GetOrCreate(endpointName)
-
-	// Register session in r.sessions BEFORE acquiring ep.mu to avoid
-	// lock ordering inversion with handleStatus (which holds r.mu then ep.mu).
-	r.mu.Lock()
-	r.sessions[session.ID] = session
-	r.mu.Unlock()
 
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
 	if ep.ProviderSession != nil {
-		// Roll back the session registration.
-		r.mu.Lock()
-		delete(r.sessions, session.ID)
-		r.mu.Unlock()
 		return fmt.Errorf("endpoint %q already has a provider", endpointName)
 	}
 
@@ -180,7 +170,6 @@ func (r *EndpointRegistry) RemoveProvider(endpointName string) {
 	}
 
 	ep.mu.Lock()
-	providerSession := ep.ProviderSession
 	ep.ProviderSession = nil
 	ep.ProviderYamux = nil
 
@@ -192,45 +181,50 @@ func (r *EndpointRegistry) RemoveProvider(endpointName string) {
 	}
 	// Clear the map — consumers will re-register when they reconnect.
 	ep.consumerYamuxSessions = make(map[string]*yamux.Session)
-	// Also clear ConsumerSessions and remove them from the global sessions map.
-	for sessionID := range ep.ConsumerSessions {
-		r.mu.Lock()
-		delete(r.sessions, sessionID)
-		r.mu.Unlock()
-	}
-	ep.ConsumerSessions = make(map[string]*transport.Session)
+	ep.ConsumerSessions = make(map[string]*brokerSession)
 	ep.mu.Unlock()
 
-	if providerSession != nil {
-		r.mu.Lock()
-		delete(r.sessions, providerSession.ID)
-		r.mu.Unlock()
-	}
-
 	// Close all consumer yamux sessions. This causes each consumer's
-	// yamuxSess.CloseChan() to fire, triggering a re-registration loop.
+	// yamuxSess.CloseChan() to fire, triggering a re-registration loop. Each
+	// consumer's underlying pollmux session closes along with it, so its next
+	// poll correctly gets 410 (not a stale 404) — the session stays in
+	// pollmux.SessionStore until the sweeper (or its own DELETE) retires it,
+	// this call only tears down topology bookkeeping, never the store.
 	// It also unblocks any bridgeStream goroutines waiting in WaitForProvider.
 	for _, ys := range consumerSessions {
 		ys.Close()
 	}
 }
 
-// RegisterSession adds a session to the sessions map so that handlePoll can
-// find it immediately. This is used for provider sessions before HandleProvider
-// is started in a goroutine (eliminating the race where early polls get 404).
-func (r *EndpointRegistry) RegisterSession(session *transport.Session) {
-	r.mu.Lock()
-	r.sessions[session.ID] = session
-	r.mu.Unlock()
+// Forget removes a session's topology bookkeeping (consumer or provider) for
+// the given role and endpoint. Called from Server.onDisconnect once pollmux
+// has already removed the session from its own SessionStore — this only
+// cleans up the derived registry view.
+func (r *EndpointRegistry) Forget(sessionID, role, endpoint string) {
+	r.mu.RLock()
+	ep, ok := r.endpoints[endpoint]
+	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	if role == "provider" {
+		ep.mu.Lock()
+		if ep.ProviderSession != nil && ep.ProviderSession.ID == sessionID {
+			ep.ProviderSession = nil
+			ep.ProviderYamux = nil
+		}
+		ep.mu.Unlock()
+	} else if role == "consumer" {
+		ep.mu.Lock()
+		delete(ep.ConsumerSessions, sessionID)
+		ep.mu.Unlock()
+	}
 }
 
 // AddConsumer registers a consumer session.
-func (r *EndpointRegistry) AddConsumer(endpointName string, session *transport.Session) {
+func (r *EndpointRegistry) AddConsumer(endpointName string, session *brokerSession) {
 	ep := r.GetOrCreate(endpointName)
-
-	r.mu.Lock()
-	r.sessions[session.ID] = session
-	r.mu.Unlock()
 
 	ep.mu.Lock()
 	ep.ConsumerSessions[session.ID] = session
@@ -267,55 +261,6 @@ func (r *EndpointRegistry) UnregisterConsumerYamux(endpointName, sessionID strin
 	ep.mu.Lock()
 	delete(ep.consumerYamuxSessions, sessionID)
 	ep.mu.Unlock()
-}
-
-// RemoveSession removes a session (consumer or provider) by session ID.
-func (r *EndpointRegistry) RemoveSession(sessionID string) {
-	r.mu.Lock()
-	session, ok := r.sessions[sessionID]
-	if ok {
-		delete(r.sessions, sessionID)
-	}
-	r.mu.Unlock()
-
-	if !ok {
-		return
-	}
-
-	// If this was a provider session, clear the endpoint's provider reference.
-	if session.Role == "provider" {
-		r.mu.RLock()
-		ep, epOk := r.endpoints[session.Endpoint]
-		r.mu.RUnlock()
-
-		if epOk {
-			ep.mu.Lock()
-			if ep.ProviderSession != nil && ep.ProviderSession.ID == sessionID {
-				ep.ProviderSession = nil
-				ep.ProviderYamux = nil
-			}
-			ep.mu.Unlock()
-		}
-	} else if session.Role == "consumer" {
-		r.mu.RLock()
-		ep, epOk := r.endpoints[session.Endpoint]
-		r.mu.RUnlock()
-
-		if epOk {
-			ep.mu.Lock()
-			delete(ep.ConsumerSessions, sessionID)
-			ep.mu.Unlock()
-		}
-	}
-}
-
-// GetSession retrieves a session by ID (for poll handler).
-func (r *EndpointRegistry) GetSession(sessionID string) (*transport.Session, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	s, ok := r.sessions[sessionID]
-	return s, ok
 }
 
 // GetEndpoint retrieves an endpoint by name.
@@ -373,16 +318,4 @@ func (r *EndpointRegistry) ConsumerCount(endpointName string) int {
 	ep.mu.RLock()
 	defer ep.mu.RUnlock()
 	return len(ep.consumerYamuxSessions)
-}
-
-// AllSessions returns all sessions (for cleanup).
-func (r *EndpointRegistry) AllSessions() []*transport.Session {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	sessions := make([]*transport.Session, 0, len(r.sessions))
-	for _, s := range r.sessions {
-		sessions = append(sessions, s)
-	}
-	return sessions
 }

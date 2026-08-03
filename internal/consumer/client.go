@@ -2,17 +2,14 @@ package consumer
 
 import (
 	"context"
-	"crypto/tls"
-	"io"
+	"log/slog"
 	"net"
-	"net/http"
 	"time"
 
-	"github.com/hashicorp/yamux"
+	"github.com/DiamondGo/pollmux"
 	socks5 "github.com/things-go/go-socks5"
 	"go.uber.org/zap"
-
-	"github.com/DiamondGo/HttpBroker/internal/transport"
+	"go.uber.org/zap/exp/zapslog"
 )
 
 // Config holds consumer configuration.
@@ -24,8 +21,8 @@ type Config struct {
 	RetryBackoff       time.Duration
 	InsecureSkipVerify bool   // Skip TLS certificate verification
 	AuthToken          string // Authentication token for broker
-	// CoalesceWindow is passed through to transport.HTTPConnector; <= 0 uses
-	// transport.DefaultCoalesceWindow.
+	// CoalesceWindow is passed through to pollmux.Connector; <= 0 uses
+	// pollmux.DefaultCoalesceWindow.
 	CoalesceWindow time.Duration
 }
 
@@ -49,13 +46,10 @@ func NewClient(config Config, logger *zap.Logger) *Client {
 //   - A single persistent SOCKS5 TCP listener is created once and kept alive
 //     for the entire lifetime of the process. This means the SOCKS5 port is
 //     always available to the browser, even during reconnects.
-//   - An inner loop handles both broker and provider disconnections by
-//     re-registering with the broker (/tunnel/connect) each time. This gives
-//     a fresh HTTPConn and session ID, which is required because yamux frames
-//     from the old session would corrupt a new yamux session on the same conn.
-//   - Broker failures use exponential backoff (1 s → 3 min).
-//   - Provider failures (broker closes yamux session) retry immediately with
-//     a short 500 ms pause to avoid tight spin.
+//   - pollmux.ReconnectLoop re-registers with the broker (/tunnel/connect)
+//     each time, giving a fresh session. Consumer is the stream-opening end,
+//     not the stream-accepting end, so AcceptLoop doesn't apply here — Serve
+//     is a hand-written four-way select, same shape as before migration.
 func (c *Client) Run(ctx context.Context) error {
 	// Create the SOCKS5 listener once. It survives all reconnects.
 	listener, err := net.Listen("tcp", c.config.Socks5Listen)
@@ -75,172 +69,111 @@ func (c *Client) Run(ctx context.Context) error {
 	defer cancelAccept()
 	go c.acceptLoop(acceptCtx, listener, connQueue)
 
-	const (
-		initialBackoff = 1 * time.Second
-		maxBackoff     = 3 * time.Minute
-	)
+	slogger := slog.New(zapslog.NewHandler(c.logger.Core()))
 
-	backoff := initialBackoff
-	lastFailWasBroker := true // first attempt always treated as broker connect
-
-	for {
-		if err := ctx.Err(); err != nil {
-			c.logger.Info("consumer shutting down",
-				zap.String("endpoint", c.config.Endpoint),
-			)
-			return err
-		}
-
-		conn, err := c.connectToBroker()
-		if err != nil {
-			c.logger.Error("failed to connect to broker — will retry",
-				zap.Error(err),
-				zap.Duration("retry_in", backoff),
-			)
-			if !sleepOrDone(ctx, backoff) {
-				return ctx.Err()
+	loop := &pollmux.ReconnectLoop{
+		Connect: func(ctx context.Context) (pollmux.Conn, error) {
+			connector := &pollmux.Connector{
+				BaseURL:   c.config.BrokerURL,
+				AuthToken: c.config.AuthToken,
+				Meta: map[string]string{
+					"role":     "consumer",
+					"endpoint": c.config.Endpoint,
+				},
+				PollInterval:       c.config.PollInterval,
+				CoalesceWindow:     c.config.CoalesceWindow,
+				InsecureSkipVerify: c.config.InsecureSkipVerify,
+				Logger:             slogger,
 			}
-			backoff = minDuration(backoff*2, maxBackoff)
-			lastFailWasBroker = true
-			continue
-		}
-
-		// Reset backoff on successful broker connection.
-		if lastFailWasBroker {
-			backoff = initialBackoff
-		}
-		lastFailWasBroker = false
-
-		c.logger.Info("broker connection established",
-			zap.String("endpoint", c.config.Endpoint),
-		)
-
-		// Build yamux session over the new broker connection.
-		yamuxConfig := yamux.DefaultConfig()
-		yamuxConfig.LogOutput = io.Discard
-		yamuxConfig.EnableKeepAlive = false
-
-		sess, err := yamux.Client(conn, yamuxConfig)
-		if err != nil {
-			c.logger.Error("failed to create yamux session — broker connection lost",
-				zap.Error(err),
+			c.logger.Info("connecting to broker",
+				zap.String("broker_url", c.config.BrokerURL),
+				zap.String("endpoint", c.config.Endpoint),
 			)
-			conn.Close()
-			if !sleepOrDone(ctx, backoff) {
-				return ctx.Err()
+			return connector.Connect(ctx)
+		},
+
+		Serve: func(ctx context.Context, conn pollmux.Conn) pollmux.Outcome {
+			// Consumer connection: the consumer opens streams TO the broker,
+			// so it is the yamux client.
+			sess, err := pollmux.ClientSession(conn)
+			if err != nil {
+				c.logger.Error("failed to create yamux session — broker connection lost",
+					zap.Error(err),
+				)
+				return pollmux.OutcomeTransportFailed
 			}
-			backoff = minDuration(backoff*2, maxBackoff)
-			lastFailWasBroker = true
-			continue
-		}
+			defer sess.Close()
 
-		c.logger.Info("yamux session established, ready to serve SOCKS5 traffic",
-			zap.String("endpoint", c.config.Endpoint),
-		)
-
-		dialer := NewTunnelDialer(sess, c.logger)
-		socksServer := socks5.NewServer(
-			socks5.WithDial(dialer.Dial),
-			socks5.WithResolver(&NoopResolver{}),
-		)
-
-		// serveCtx is cancelled when this yamux session ends.
-		serveCtx, cancelServe := context.WithCancel(ctx)
-		go c.serveLoop(serveCtx, socksServer, connQueue)
-
-		// Wait for one of three events:
-		//   1. ctx cancelled → clean exit
-		//   2. conn.TransportFailed() → broker is gone, reconnect with backoff
-		//   3. sess.CloseChan() → yamux session closed; check if broker is alive
-		var providerDisconnected bool
-		select {
-		case <-ctx.Done():
-			c.logger.Info("consumer shutting down — closing broker connection",
+			c.logger.Info("yamux session established, ready to serve SOCKS5 traffic",
 				zap.String("endpoint", c.config.Endpoint),
 			)
-			cancelServe()
-			sess.Close()
-			conn.Close()
-			return ctx.Err()
 
-		case <-conn.TransportFailed():
-			c.logger.Warn("broker transport failed — will reconnect with backoff",
-				zap.String("endpoint", c.config.Endpoint),
+			dialer := NewTunnelDialer(sess, c.logger)
+			socksServer := socks5.NewServer(
+				socks5.WithDial(dialer.Dial),
+				socks5.WithResolver(&NoopResolver{}),
 			)
-			cancelServe()
-			sess.Close()
-			conn.Close()
-			providerDisconnected = false
-			lastFailWasBroker = true
 
-		case <-sess.CloseChan():
-			// yamux session closed. Check whether the HTTP transport is still alive.
+			// serveCtx is cancelled when this yamux session ends.
+			serveCtx, cancelServe := context.WithCancel(ctx)
+			defer cancelServe()
+			go c.serveLoop(serveCtx, socksServer, connQueue)
+
 			select {
+			case <-ctx.Done():
+				c.logger.Info("consumer shutting down — closing broker connection",
+					zap.String("endpoint", c.config.Endpoint),
+				)
+				return pollmux.OutcomeShutdown
+
 			case <-conn.TransportFailed():
-				c.logger.Warn(
-					"broker transport failed (detected via yamux close) — will reconnect with backoff",
+				c.logger.Warn("broker transport failed — will reconnect with backoff",
 					zap.String("endpoint", c.config.Endpoint),
 				)
-				cancelServe()
-				sess.Close()
-				conn.Close()
-				providerDisconnected = false
-				lastFailWasBroker = true
-			default:
-				// Transport still alive — broker closed our yamux session because
-				// the provider disconnected.
-				c.logger.Warn("provider disconnected — re-registering with broker",
-					zap.String("endpoint", c.config.Endpoint),
-				)
-				cancelServe()
-				sess.Close()
-				conn.Close()
-				providerDisconnected = true
-				lastFailWasBroker = false
+				return pollmux.OutcomeTransportFailed
+
+			case <-sess.CloseChan():
+				// yamux session closed. Check whether the HTTP transport is
+				// still alive to tell "broker gone" from "provider left,
+				// broker closed our session" — a yamux close alone can't
+				// distinguish the two.
+				select {
+				case <-conn.TransportFailed():
+					c.logger.Warn(
+						"broker transport failed (detected via yamux close) — will reconnect with backoff",
+						zap.String("endpoint", c.config.Endpoint),
+					)
+					return pollmux.OutcomeTransportFailed
+				default:
+					c.logger.Warn("provider disconnected — re-registering with broker",
+						zap.String("endpoint", c.config.Endpoint),
+					)
+					return pollmux.OutcomePeerClosed
+				}
 			}
-		}
+		},
 
-		if providerDisconnected {
-			// Brief pause before re-registering to avoid tight spin.
-			if !sleepOrDone(ctx, 500*time.Millisecond) {
-				return ctx.Err()
-			}
-			// backoff stays at initialBackoff for provider reconnects
-		} else {
-			// Broker failure — apply backoff.
-			if !sleepOrDone(ctx, backoff) {
-				return ctx.Err()
-			}
-			backoff = minDuration(backoff*2, maxBackoff)
-		}
-	}
-}
-
-// connectToBroker creates a fresh HTTP client and registers with the broker.
-func (c *Client) connectToBroker() (transport.Conn, error) {
-	httpTransport := &http.Transport{
-		ResponseHeaderTimeout: 0,
-		IdleConnTimeout:       0,
-		DisableKeepAlives:     false,
-	}
-	if c.config.InsecureSkipVerify {
-		httpTransport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true,
-		}
-	}
-	httpClient := &http.Client{
-		Timeout:   0,
-		Transport: httpTransport,
+		// InitialBackoff is operator-configurable via RetryBackoff (unset uses
+		// pollmux.DefaultInitialBackoff, 1s).
+		//
+		// Note this now governs the provider-disconnect reconnect delay too:
+		// when the provider leaves, the broker closes the consumer's tunnel as
+		// well (yamux.Session.Close closes the underlying conn), so the
+		// consumer sees 410/TransportFailed() instead of the pre-migration
+		// 204/PeerClosed path, and reconnects through the backoff branch
+		// rather than PeerClosedPause. Since ReconnectLoop resets backoff on
+		// every successful connect, a low RetryBackoff keeps that case's
+		// delay small and constant; a higher value trades slower recovery
+		// from a flapping provider for less connection churn.
+		InitialBackoff: c.config.RetryBackoff,
+		Logger:         slogger,
 	}
 
-	connector := &transport.HTTPConnector{
-		PollInterval:        c.config.PollInterval,
-		HTTPClient:          httpClient,
-		AuthToken:           c.config.AuthToken,
-		WriteCoalesceWindow: c.config.CoalesceWindow,
+	err = loop.Run(ctx)
+	if ctx.Err() != nil {
+		c.logger.Info("consumer shutting down", zap.String("endpoint", c.config.Endpoint))
 	}
-
-	return connector.Connect(c.config.BrokerURL, "consumer", c.config.Endpoint)
+	return err
 }
 
 // acceptLoop continuously accepts TCP connections from listener and sends them
@@ -287,22 +220,4 @@ func (c *Client) serveLoop(ctx context.Context, server *socks5.Server, connQueue
 			}(conn)
 		}
 	}
-}
-
-// sleepOrDone sleeps for d or returns false if ctx is done.
-func sleepOrDone(ctx context.Context, d time.Duration) bool {
-	select {
-	case <-ctx.Done():
-		return false
-	case <-time.After(d):
-		return true
-	}
-}
-
-// minDuration returns the smaller of a and b.
-func minDuration(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
 }

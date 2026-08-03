@@ -3,6 +3,7 @@ package broker
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,10 +220,11 @@ func TestUnauthorizedRedirectEnabled(t *testing.T) {
 
 	// Test authorized request still works
 	t.Run("Authorized request works normally", func(t *testing.T) {
+		body := strings.NewReader(`{"protocol_version":1,"meta":{"role":"consumer","endpoint":"test"}}`)
 		req, _ := http.NewRequest(
 			http.MethodPost,
-			"http://127.0.0.1:18093/tunnel/connect?role=consumer&endpoint=test",
-			nil,
+			"http://127.0.0.1:18093/tunnel/connect",
+			body,
 		)
 		req.Header.Set("Authorization", "Bearer test-secret-token")
 		resp, err := noRedirectClient.Do(req)
