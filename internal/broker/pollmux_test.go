@@ -37,7 +37,7 @@ func TestConnectHandshake(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18095")
 
 	post := func(body string) *http.Response {
 		resp, err := http.Post(
@@ -142,7 +142,7 @@ func TestPollOversizedBodyClosesSession(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18096")
 
 	resp, err := http.Post(
 		"http://127.0.0.1:18096/tunnel/connect",
@@ -224,7 +224,7 @@ func TestRemoveProviderKeepsConsumerSessionsInStore(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18097")
 
 	connect := func(role string) string {
 		resp, err := http.Post(
@@ -249,15 +249,14 @@ func TestRemoveProviderKeepsConsumerSessionsInStore(t *testing.T) {
 	providerID := connect("provider")
 	consumerID := connect("consumer")
 
-	// Let the OnConnect goroutines run (SetProvider/AddConsumer, yamux setup).
-	time.Sleep(200 * time.Millisecond)
-
-	if _, ok := srv.store.Get(providerID); !ok {
-		t.Fatal("expected provider session to be in the store before disconnect")
-	}
-	if _, ok := srv.store.Get(consumerID); !ok {
-		t.Fatal("expected consumer session to be in the store before disconnect")
-	}
+	// Session registration in the store happens synchronously before the
+	// connect handler responds, but poll (with a generous bound) rather
+	// than assume that ordering forever.
+	waitFor(t, time.Second, "provider and consumer sessions present in the store", func() bool {
+		_, providerOK := srv.store.Get(providerID)
+		_, consumerOK := srv.store.Get(consumerID)
+		return providerOK && consumerOK
+	})
 
 	// Disconnect the provider the same way a real client does.
 	req, _ := http.NewRequest(http.MethodDelete, "http://127.0.0.1:18097/tunnel/"+providerID, nil)
@@ -267,18 +266,17 @@ func TestRemoveProviderKeepsConsumerSessionsInStore(t *testing.T) {
 	}
 	delResp.Body.Close()
 
-	// Give HandleProvider's deferred RemoveProvider a moment to run: the
-	// DELETE closes the provider's pollmux Session, which the yamux Client
-	// session wrapping it detects as EOF, unblocking HandleProvider's
-	// CloseChan() wait.
-	time.Sleep(300 * time.Millisecond)
-
 	if _, ok := srv.registry.GetEndpoint("ep1"); !ok {
 		t.Fatal("expected endpoint ep1 to still exist")
 	}
-	if srv.registry.HasProvider("ep1") {
-		t.Error("expected provider to be removed from the endpoint after disconnect")
-	}
+
+	// The DELETE closes the provider's pollmux Session, which the yamux
+	// Client session wrapping it detects as EOF, unblocking HandleProvider's
+	// CloseChan() wait and running its deferred RemoveProvider. That happens
+	// on a goroutine, so poll for it instead of sleeping and hoping.
+	waitFor(t, time.Second, "provider removed from endpoint ep1 after disconnect", func() bool {
+		return !srv.registry.HasProvider("ep1")
+	})
 
 	// The bug: RemoveProvider used to delete the consumer from the global
 	// session index too, even though its long-poll tunnel was still alive.
@@ -310,7 +308,7 @@ func TestShutdownOrdering(t *testing.T) {
 		}
 	}()
 
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18098")
 
 	resp, err := http.Post(
 		"http://127.0.0.1:18098/tunnel/connect",
@@ -322,11 +320,9 @@ func TestShutdownOrdering(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	time.Sleep(200 * time.Millisecond)
-
-	if srv.store.Len() == 0 {
-		t.Fatal("expected at least one live session before Stop")
-	}
+	waitFor(t, time.Second, "at least one live session before Stop", func() bool {
+		return srv.store.Len() > 0
+	})
 
 	if err := srv.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop returned error: %v", err)

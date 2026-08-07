@@ -32,8 +32,7 @@ func TestStatusEndpointEnabled(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	// Wait for server to start
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18090")
 
 	// Test that /status is accessible
 	resp, err := http.Get("http://127.0.0.1:18090/status")
@@ -69,8 +68,7 @@ func TestStatusEndpointDisabled(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	// Wait for server to start
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18091")
 
 	// Test that /status returns 404
 	resp, err := http.Get("http://127.0.0.1:18091/status")
@@ -108,7 +106,7 @@ func TestUnauthorizedRedirectDisabled(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18092")
 
 	// Test unauthorized request to /tunnel/connect returns 401
 	t.Run("Unauthorized tunnel request returns 401", func(t *testing.T) {
@@ -167,7 +165,7 @@ func TestUnauthorizedRedirectEnabled(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18093")
 
 	// Create a client that does NOT follow redirects
 	noRedirectClient := &http.Client{
@@ -263,7 +261,7 @@ func TestUnauthorizedRedirectWithRelativePath(t *testing.T) {
 	}()
 	defer srv.Stop(context.Background())
 
-	time.Sleep(200 * time.Millisecond)
+	waitForServerReady(t, "127.0.0.1:18094")
 
 	noRedirectClient := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
