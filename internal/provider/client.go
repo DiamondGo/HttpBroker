@@ -23,6 +23,9 @@ type Config struct {
 	// CoalesceWindow is passed through to pollmux.Connector; <= 0 uses
 	// pollmux.DefaultCoalesceWindow.
 	CoalesceWindow time.Duration
+	// PollMode is "" or "stream" (default) to request stream mode, or
+	// "batch" to opt out and force the older discrete poll mode.
+	PollMode string
 }
 
 // Client is the provider client.
@@ -39,6 +42,15 @@ func NewClient(config Config, logger *zap.Logger) *Client {
 		handler: NewStreamHandler(config.DialTimeout, config.ScrubHeaders, logger),
 		logger:  logger,
 	}
+}
+
+// preferStreamMode reports whether pollMode should make the client ask the
+// broker to negotiate stream mode. Empty (default) prefers it; only "batch"
+// opts out. The broker independently decides too — negotiation is "client
+// asks && server supports" — so this is safe to leave at the default even
+// against an older broker.
+func preferStreamMode(pollMode string) bool {
+	return pollMode != pollmux.PollModeBatch
 }
 
 // Run connects to the broker and accepts streams, reconnecting with backoff
@@ -62,6 +74,7 @@ func (c *Client) Run(ctx context.Context) error {
 				PollInterval:       c.config.PollInterval,
 				CoalesceWindow:     c.config.CoalesceWindow,
 				InsecureSkipVerify: c.config.InsecureSkipVerify,
+				PreferStream:       preferStreamMode(c.config.PollMode),
 				Logger:             slogger,
 			}
 			return connector.Connect(ctx)

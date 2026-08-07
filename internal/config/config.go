@@ -56,6 +56,13 @@ type TunnelConfig struct {
 	// HighWaterWarn logs a one-shot warning when either direction of a
 	// session buffers this many bytes. Zero disables it.
 	HighWaterWarn int `mapstructure:"high_water_warn"`
+	// PollMode selects the downstream transport mode. Empty/unset defaults
+	// to "stream": the long-poll response stays open and pushes data as it
+	// arrives, removing batch mode's one-poll-buffer-per-RTT ceiling. Set
+	// to "batch" to force the older discrete request/response mode. Any
+	// other value panics the broker at startup rather than silently
+	// defaulting.
+	PollMode string `mapstructure:"poll_mode"`
 }
 
 // AuthConfig holds authentication settings.
@@ -99,6 +106,11 @@ type TransportConfig struct {
 	// writes a chance to merge into the same HTTP request. Zero/unset uses
 	// pollmux.DefaultCoalesceWindow (2ms).
 	CoalesceWindow time.Duration `mapstructure:"coalesce_window"`
+	// PollMode requests the server negotiate stream mode. Empty/unset
+	// defaults to "stream"; set to "batch" to opt out. Negotiation still
+	// requires the broker to support stream mode too, so this is safe to
+	// leave at the default even against an older broker.
+	PollMode string `mapstructure:"poll_mode"`
 }
 
 // ProviderConfig holds configuration for the provider (Machine C).

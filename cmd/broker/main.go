@@ -61,7 +61,8 @@ func main() {
 			}
 			// PollTimeout/SessionTimeout/PollBufferSize/MaxSendBytes/HighWaterWarn
 			// are left at zero when unset in config — pollmux.ServerConfig falls
-			// back to its own documented defaults for each.
+			// back to its own documented defaults for each. PollMode defaults to
+			// stream mode (see broker.Config.PollMode) when unset.
 
 			// Create logger
 			logger, err := config.NewLogger(cfg.Logging.Level)
@@ -82,6 +83,7 @@ func main() {
 				PollBufferSize:              cfg.Tunnel.PollBufferSize,
 				MaxSendBytes:                cfg.Tunnel.MaxSendBytes,
 				HighWaterWarn:               cfg.Tunnel.HighWaterWarn,
+				PollMode:                    cfg.Tunnel.PollMode,
 				AuthEnabled:                 cfg.Auth.Enabled,
 				AuthToken:                   cfg.Auth.Token,
 				StatusEndpointEnabled:       cfg.Server.StatusEndpointEnabled,

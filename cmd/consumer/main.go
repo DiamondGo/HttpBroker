@@ -84,6 +84,7 @@ func main() {
 				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
 				AuthToken:          cfg.Broker.AuthToken,
 				CoalesceWindow:     cfg.Transport.CoalesceWindow,
+				PollMode:           cfg.Transport.PollMode,
 			}, logger)
 
 			logger.Info("starting consumer",

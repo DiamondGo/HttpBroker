@@ -17,6 +17,9 @@ transport:
                             # an idle-to-active burst, letting immediately-
                             # following writes merge into one HTTP request.
                             # Default 2ms if omitted.
+  # poll_mode: "stream"     # "stream" (default) or "batch". Stream mode asks the
+                            # broker to negotiate stream mode; falls back to batch
+                            # silently if the broker doesn't support it.
 
 logging:
   level: "info"

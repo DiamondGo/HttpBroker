@@ -26,6 +26,7 @@ type Config struct {
 	PollBufferSize              int           // bytes per long-poll response (default: pollmux.DefaultPollBufferSize, 256KiB)
 	MaxSendBytes                int           // cap on a single request body (default: pollmux.DefaultMaxSendBytes, 1MiB)
 	HighWaterWarn               int           // log once when a session buffers this many bytes; 0 disables
+	PollMode                    string        // "" defaults to stream mode; "batch" forces the older discrete poll mode; any other value panics at startup (see resolvePollMode)
 	AuthEnabled                 bool          // whether authentication is enabled
 	AuthToken                   string        // authentication token (used when AuthEnabled is true)
 	StatusEndpointEnabled       bool          // whether to expose GET /status endpoint (default: false)
@@ -58,6 +59,18 @@ type Server struct {
 	version     string    // broker version
 }
 
+// resolvePollMode maps Config.PollMode to the pollmux.ServerConfig.PollMode
+// value: empty (unset) defaults to stream, "batch" opts out. Any other value
+// is passed through as-is so pollmux.ServerConfig.check() rejects it loudly
+// at startup instead of this function silently coercing a typo to a mode the
+// operator didn't ask for.
+func resolvePollMode(configured string) string {
+	if configured == "" {
+		return pollmux.PollModeStream
+	}
+	return configured
+}
+
 // NewServer creates a new broker Server.
 func NewServer(config Config, logger *zap.Logger) *Server {
 	registry := NewEndpointRegistry()
@@ -81,6 +94,7 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		PollBufferSize: config.PollBufferSize,
 		MaxSendBytes:   config.MaxSendBytes,
 		HighWaterWarn:  config.HighWaterWarn,
+		PollMode:       resolvePollMode(config.PollMode),
 		// This project uses gorilla/mux, not net/http's own router.
 		SessionIDFunc: func(r *http.Request) string { return mux.Vars(r)["id"] },
 		Logger:        slogger,
