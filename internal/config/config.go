@@ -111,6 +111,15 @@ type TransportConfig struct {
 	// requires the broker to support stream mode too, so this is safe to
 	// leave at the default even against an older broker.
 	PollMode string `mapstructure:"poll_mode"`
+	// PollGrace is how long the poll request's ResponseHeaderTimeout waits
+	// beyond the point pollmux itself would normally have replied, before
+	// giving up on that HTTP round trip. In stream mode this is effectively
+	// the whole timeout (the broker flushes headers almost immediately once
+	// it replies at all), so a reverse proxy, CDN, or load balancer sitting
+	// in front of the broker that adds its own connection/header latency
+	// needs this raised — the default (pollmux.DefaultPollGrace, 10s) can be
+	// too tight for that extra hop. Zero/unset uses the pollmux default.
+	PollGrace time.Duration `mapstructure:"poll_grace"`
 }
 
 // ProviderConfig holds configuration for the provider (Machine C).

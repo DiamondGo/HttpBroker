@@ -26,6 +26,11 @@ type Config struct {
 	// PollMode is "" or "stream" (default) to request stream mode, or
 	// "batch" to opt out and force the older discrete poll mode.
 	PollMode string
+	// PollGrace is passed through to pollmux.Connector; <= 0 uses
+	// pollmux.DefaultPollGrace. Raise it when the broker sits behind a
+	// reverse proxy/CDN whose own latency can push a stream-mode poll's
+	// response headers past the default 10s.
+	PollGrace time.Duration
 }
 
 // Client is the provider client.
@@ -75,6 +80,7 @@ func (c *Client) Run(ctx context.Context) error {
 				CoalesceWindow:     c.config.CoalesceWindow,
 				InsecureSkipVerify: c.config.InsecureSkipVerify,
 				PreferStream:       preferStreamMode(c.config.PollMode),
+				PollGrace:          c.config.PollGrace,
 				Logger:             slogger,
 			}
 			return connector.Connect(ctx)

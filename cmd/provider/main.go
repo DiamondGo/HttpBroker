@@ -86,6 +86,7 @@ func main() {
 				AuthToken:          cfg.Broker.AuthToken,
 				CoalesceWindow:     cfg.Transport.CoalesceWindow,
 				PollMode:           cfg.Transport.PollMode,
+				PollGrace:          cfg.Transport.PollGrace,
 			}, logger)
 
 			logger.Info("starting provider",

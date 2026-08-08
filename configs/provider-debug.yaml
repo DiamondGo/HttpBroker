@@ -18,6 +18,13 @@ transport:
   # poll_mode: "stream"     # "stream" (default) or "batch". Stream mode asks the
                             # broker to negotiate stream mode; falls back to batch
                             # silently if the broker doesn't support it.
+  # poll_grace: "10s"       # Extra time a poll request's response-header wait gets
+                            # beyond what pollmux itself needs. In stream mode this
+                            # is effectively the whole timeout, since the broker
+                            # flushes headers almost immediately once it replies at
+                            # all — raise this if the broker sits behind a reverse
+                            # proxy/CDN/load balancer whose own latency can exceed
+                            # the default 10s. Default 10s if omitted.
 
 logging:
   level: "debug"
