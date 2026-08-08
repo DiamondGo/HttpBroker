@@ -84,6 +84,7 @@ func main() {
 				MaxSendBytes:                cfg.Tunnel.MaxSendBytes,
 				HighWaterWarn:               cfg.Tunnel.HighWaterWarn,
 				PollMode:                    cfg.Tunnel.PollMode,
+				EnableWebSocket:             cfg.Tunnel.EnableWebSocket,
 				AuthEnabled:                 cfg.Auth.Enabled,
 				AuthToken:                   cfg.Auth.Token,
 				StatusEndpointEnabled:       cfg.Server.StatusEndpointEnabled,

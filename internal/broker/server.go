@@ -27,6 +27,7 @@ type Config struct {
 	MaxSendBytes                int           // cap on a single request body (default: pollmux.DefaultMaxSendBytes, 1MiB)
 	HighWaterWarn               int           // log once when a session buffers this many bytes; 0 disables
 	PollMode                    string        // "" defaults to stream mode; "batch" forces the older discrete poll mode; any other value panics at startup (see resolvePollMode)
+	EnableWebSocket             bool          // whether to offer pollmux's WebSocket transport when a client asks for it (default: false)
 	AuthEnabled                 bool          // whether authentication is enabled
 	AuthToken                   string        // authentication token (used when AuthEnabled is true)
 	StatusEndpointEnabled       bool          // whether to expose GET /status endpoint (default: false)
@@ -88,13 +89,14 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 	}
 
 	s.pcfg = pollmux.ServerConfig{
-		PollTimeout:    config.PollTimeout,
-		SessionTimeout: config.SessionTimeout,
-		CoalesceWindow: config.CoalesceWindow,
-		PollBufferSize: config.PollBufferSize,
-		MaxSendBytes:   config.MaxSendBytes,
-		HighWaterWarn:  config.HighWaterWarn,
-		PollMode:       resolvePollMode(config.PollMode),
+		PollTimeout:     config.PollTimeout,
+		SessionTimeout:  config.SessionTimeout,
+		CoalesceWindow:  config.CoalesceWindow,
+		PollBufferSize:  config.PollBufferSize,
+		MaxSendBytes:    config.MaxSendBytes,
+		HighWaterWarn:   config.HighWaterWarn,
+		PollMode:        resolvePollMode(config.PollMode),
+		EnableWebSocket: config.EnableWebSocket,
 		// This project uses gorilla/mux, not net/http's own router.
 		SessionIDFunc: func(r *http.Request) string { return mux.Vars(r)["id"] },
 		Logger:        slogger,
@@ -134,6 +136,10 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
 			pollmux.DeleteHandler(store, s.pcfg, s.hooks))).
 		Methods("DELETE")
+	router.Handle("/tunnel/{id}/ws",
+		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
+			pollmux.WebSocketHandler(store, s.pcfg, s.hooks))).
+		Methods("GET")
 
 	// Conditionally register /status endpoint based on configuration
 	if config.StatusEndpointEnabled {

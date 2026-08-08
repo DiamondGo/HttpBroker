@@ -116,3 +116,85 @@ func TestBrokerPollModeBatchOverridesClientPreference(t *testing.T) {
 			got, pollmux.PollModeBatch)
 	}
 }
+
+// connectWebSocketPreferring POSTs a raw connect request asking the server to
+// negotiate WebSocket transport, and returns the transport the server
+// actually negotiated ("" or pollmux.TransportWebSocket). Exercises the same
+// real wire protocol a pollmux.Connector with PreferWebSocket=true takes.
+func connectWebSocketPreferring(t *testing.T, addr string) string {
+	t.Helper()
+	body := strings.NewReader(`{"protocol_version":1,"meta":{"role":"consumer","endpoint":"ep1"},"prefer_websocket":true}`)
+	resp, err := http.Post("http://"+addr+"/tunnel/connect", "application/json", body)
+	if err != nil {
+		t.Fatalf("connect request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("connect status = %d, want 200", resp.StatusCode)
+	}
+	var cr pollmux.ConnectResponse
+	if err := json.NewDecoder(resp.Body).Decode(&cr); err != nil {
+		t.Fatalf("decode connect response: %v", err)
+	}
+	return cr.Transport
+}
+
+// TestBrokerNegotiatesWebSocketWhenEnabledAndRequested confirms the actual
+// wiring added for HttpBroker's WebSocket support: with Config.EnableWebSocket
+// set, a client asking for it via PreferWebSocket gets it negotiated — proving
+// broker.Config.EnableWebSocket really reaches pollmux.ServerConfig.EnableWebSocket
+// (a struct literal field-name typo would silently compile since both are
+// plain bools, so this exercises the wire protocol rather than trusting the
+// struct literal alone).
+func TestBrokerNegotiatesWebSocketWhenEnabledAndRequested(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	cfg := Config{
+		ListenAddr:      "127.0.0.1:18101",
+		PollTimeout:     1 * time.Second,
+		SessionTimeout:  5 * time.Minute,
+		EnableWebSocket: true,
+	}
+	srv := NewServer(cfg, logger)
+	go func() {
+		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
+			t.Logf("server error: %v", err)
+		}
+	}()
+	defer srv.Stop(context.Background())
+	waitForServerReady(t, "127.0.0.1:18101")
+
+	if got := connectWebSocketPreferring(t, "127.0.0.1:18101"); got != pollmux.TransportWebSocket {
+		t.Fatalf("negotiated transport = %q, want %q (Config.EnableWebSocket must reach pollmux.ServerConfig.EnableWebSocket)",
+			got, pollmux.TransportWebSocket)
+	}
+}
+
+// TestBrokerStaysOffWebSocketWhenNotEnabled confirms the default (off) is
+// wired correctly too: a zero-valued Config.EnableWebSocket must not
+// negotiate WebSocket transport even when the client asks for it, so
+// existing deployments that upgrade HttpBroker without touching config stay
+// on poll/send-stream exactly as before.
+func TestBrokerStaysOffWebSocketWhenNotEnabled(t *testing.T) {
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+
+	cfg := Config{
+		ListenAddr:     "127.0.0.1:18102",
+		PollTimeout:    1 * time.Second,
+		SessionTimeout: 5 * time.Minute,
+	}
+	srv := NewServer(cfg, logger)
+	go func() {
+		if err := srv.Start(); err != nil && err != http.ErrServerClosed {
+			t.Logf("server error: %v", err)
+		}
+	}()
+	defer srv.Stop(context.Background())
+	waitForServerReady(t, "127.0.0.1:18102")
+
+	if got := connectWebSocketPreferring(t, "127.0.0.1:18102"); got != "" {
+		t.Fatalf("negotiated transport = %q, want \"\" (default Config.EnableWebSocket=false must not offer WebSocket)", got)
+	}
+}

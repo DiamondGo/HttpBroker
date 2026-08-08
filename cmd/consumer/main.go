@@ -88,6 +88,7 @@ func main() {
 				PollGrace:              cfg.Transport.PollGrace,
 				UploadStreamPreference: cfg.Transport.UploadStreamPreference,
 				UploadProbeTimeout:     cfg.Transport.UploadProbeTimeout,
+				PreferWebSocket:        cfg.Transport.PreferWebSocket,
 			}, logger)
 
 			logger.Info("starting consumer",

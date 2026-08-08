@@ -1,5 +1,7 @@
-github.com/DiamondGo/pollmux v0.1.3 h1:pplZQ9h8RY64qmDIVdCt/y9YrwGS7HV69+FE7Rp5saI=
-github.com/DiamondGo/pollmux v0.1.3/go.mod h1:7I9B+AjZ7KhkUXc1/MaWWFxZc2YJ3+WkrFF8a2l1ib4=
+github.com/DiamondGo/pollmux v0.1.4 h1:TYdt2ULiTXXmRYpqW1Y2PzVfCxZt5LZ1onKMIzaV87M=
+github.com/DiamondGo/pollmux v0.1.4/go.mod h1:NTnsxxc1ayW9f0gdUr160544aPC6i7xJGfoOXd3M560=
+github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
+github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6NIQQ7OS05n1F4g=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

@@ -63,6 +63,17 @@ type TunnelConfig struct {
 	// other value panics the broker at startup rather than silently
 	// defaulting.
 	PollMode string `mapstructure:"poll_mode"`
+	// EnableWebSocket lets the broker negotiate pollmux's WebSocket transport
+	// for a session instead of poll/send-stream, when the connecting client
+	// also asks for it (transport.prefer_websocket on the consumer/provider
+	// side). Off by default: it's a new, additive transport that needs a
+	// reverse proxy/CDN in front of the broker to forward WebSocket upgrade
+	// requests on /tunnel/{id}/ws, so it must be opted into deliberately
+	// rather than silently changed under existing deployments. When off (or
+	// when the client doesn't ask), negotiation falls back to whatever
+	// PollMode would otherwise select — this never breaks a client running
+	// an older pollmux that doesn't know about WebSocket at all.
+	EnableWebSocket bool `mapstructure:"enable_websocket"`
 }
 
 // AuthConfig holds authentication settings.
@@ -136,6 +147,17 @@ type TransportConfig struct {
 	// UploadProbeTimeout bounds the auto-detect probe run when
 	// UploadStreamPreference is "". Zero/unset uses pollmux's default (15s).
 	UploadProbeTimeout time.Duration `mapstructure:"upload_probe_timeout"`
+	// PreferWebSocket asks the broker to negotiate pollmux's WebSocket
+	// transport instead of poll/send-stream. It only takes effect if the
+	// broker also has tunnel.enable_websocket set — negotiation is "client
+	// asks && server supports", so leaving this on is safe even against a
+	// broker that hasn't turned WebSocket on (or an older broker that
+	// doesn't know about it at all; it just silently falls back to
+	// PollMode). WebSocket rides a single persistent connection for both
+	// directions, avoiding the long-lived chunked-body buffering some CDNs
+	// (observed with Cloudflare's standard tiers) apply to stream mode's
+	// upload direction — see pollmux's README ("WebSocket 传输模式").
+	PreferWebSocket bool `mapstructure:"prefer_websocket"`
 }
 
 // ProviderConfig holds configuration for the provider (Machine C).

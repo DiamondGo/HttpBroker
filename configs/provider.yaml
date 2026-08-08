@@ -34,6 +34,16 @@ transport:
                             # outright); "batch" always uses the discrete per-chunk
                             # send path.
   # upload_probe_timeout: "15s"  # Bounds the auto-detect probe above. Default 15s.
+  # prefer_websocket: false  # Ask the broker to negotiate pollmux's WebSocket
+                            # transport instead of poll/send-stream. Only takes
+                            # effect if the broker also has tunnel.enable_websocket
+                            # on; otherwise this is silently ignored and
+                            # negotiation falls back to poll_mode, so it's safe to
+                            # leave on even against a broker that hasn't enabled it
+                            # (or an older broker that doesn't know about it at
+                            # all). WebSocket avoids the long-lived chunked-body
+                            # buffering some CDNs apply to stream mode's upload
+                            # direction.
 
 logging:
   level: "info"

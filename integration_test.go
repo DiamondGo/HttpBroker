@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -120,10 +121,14 @@ func buildBinaries(t *testing.T) {
 
 const testEndpoint = "integration-test"
 
-func launchBroker(t *testing.T, port int) *component {
+// extraArgs lets callers append config-file/mode overrides (e.g. --config
+// pointing at a temp YAML file that turns on tunnel.enable_websocket) without
+// every other launch* caller needing to know about them.
+func launchBroker(t *testing.T, port int, extraArgs ...string) *component {
 	t.Helper()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	cmd := exec.Command("./bin/httpbroker-broker", "--listen", addr, "--enable-status")
+	args := append([]string{"--listen", addr, "--enable-status"}, extraArgs...)
+	cmd := exec.Command("./bin/httpbroker-broker", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -133,13 +138,14 @@ func launchBroker(t *testing.T, port int) *component {
 	return &component{name: "broker", cmd: cmd}
 }
 
-func launchProvider(t *testing.T, brokerPort int) *component {
+func launchProvider(t *testing.T, brokerPort int, extraArgs ...string) *component {
 	t.Helper()
 	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", brokerPort)
-	cmd := exec.Command("./bin/httpbroker-provider",
+	args := append([]string{
 		"--broker-url", brokerURL,
 		"--endpoint", testEndpoint,
-	)
+	}, extraArgs...)
+	cmd := exec.Command("./bin/httpbroker-provider", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -149,15 +155,16 @@ func launchProvider(t *testing.T, brokerPort int) *component {
 	return &component{name: "provider", cmd: cmd}
 }
 
-func launchConsumer(t *testing.T, brokerPort, socks5Port int) *component {
+func launchConsumer(t *testing.T, brokerPort, socks5Port int, extraArgs ...string) *component {
 	t.Helper()
 	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", brokerPort)
 	socks5Addr := fmt.Sprintf("127.0.0.1:%d", socks5Port)
-	cmd := exec.Command("./bin/httpbroker-consumer",
+	args := append([]string{
 		"--broker-url", brokerURL,
 		"--endpoint", testEndpoint,
 		"--socks5-listen", socks5Addr,
-	)
+	}, extraArgs...)
+	cmd := exec.Command("./bin/httpbroker-consumer", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -568,4 +575,62 @@ func TestIntegration_BrokerDisconnect(t *testing.T) {
 	time.Sleep(10 * time.Second)
 
 	assertConnectivity(t, h.httpClient, "after-reconnect")
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Test Case 5 – WebSocket transport
+// ────────────────────────────────────────────────────────────────────────────
+
+// writeTempConfig writes a minimal YAML config file under t.TempDir() and
+// returns its path. Fields left out are zero, so the corresponding main.go
+// picks its own default (or a CLI flag overrides it, as launchBroker et al.
+// already do for listen/broker-url/endpoint/socks5-listen) — this only needs
+// to carry the one setting the test cares about.
+func writeTempConfig(t *testing.T, name, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write temp config %s: %v", name, err)
+	}
+	return path
+}
+
+// TestIntegration_WebSocketTransport starts broker, provider, and consumer
+// with tunnel.enable_websocket / transport.prefer_websocket turned on via
+// config file, and verifies SOCKS5 traffic actually flows — i.e. that
+// negotiation lands on pollmux's WebSocket transport end to end through real
+// subprocess binaries, not just that the code compiles against the new
+// pollmux fields.
+func TestIntegration_WebSocketTransport(t *testing.T) {
+	buildBinaries(t)
+
+	brokerCfg := writeTempConfig(t, "broker.yaml", "tunnel:\n  enable_websocket: true\n")
+	consumerCfg := writeTempConfig(t, "consumer.yaml", "transport:\n  prefer_websocket: true\n")
+	providerCfg := writeTempConfig(t, "provider.yaml", "transport:\n  prefer_websocket: true\n")
+
+	brokerPort, err := randomHighPort()
+	if err != nil {
+		t.Fatalf("allocate broker port: %v", err)
+	}
+	socks5Port, err := randomHighPort()
+	if err != nil {
+		t.Fatalf("allocate socks5 port: %v", err)
+	}
+
+	broker := launchBroker(t, brokerPort, "--config", brokerCfg)
+	defer broker.stop(t)
+	waitForBroker(t, brokerPort, 15*time.Second)
+
+	provider := launchProvider(t, brokerPort, "--config", providerCfg)
+	defer provider.stop(t)
+
+	consumer := launchConsumer(t, brokerPort, socks5Port, "--config", consumerCfg)
+	defer consumer.stop(t)
+	waitForSOCKS5(t, socks5Port, 20*time.Second)
+
+	// Give provider a moment to register with the broker.
+	time.Sleep(1 * time.Second)
+
+	client := newSOCKS5Client(t, socks5Port)
+	assertConnectivity(t, client, "WebSocketTransport")
 }

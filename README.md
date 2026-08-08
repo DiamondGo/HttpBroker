@@ -62,6 +62,10 @@ Both the Consumer and Provider maintain a continuous loop of HTTP POST requests 
 
 To any network observer, this looks like a web application making regular API calls — no WebSockets, no persistent connections, no special protocols.
 
+### WebSocket Transport (optional)
+
+Set `tunnel.enable_websocket: true` on the Broker and `transport.prefer_websocket: true` on the Consumer/Provider to negotiate a WebSocket connection instead of the long-polling loop above. It's off by default and only takes effect when both sides opt in, so it trades the long-polling loop's "looks like ordinary API traffic" property for reliability against reverse proxies/CDNs that buffer a long-lived chunked request body instead of forwarding it live (observed with Cloudflare's standard tiers) — that buffering can hang the tunnel outright rather than just slow it down. See [pollmux's README](https://github.com/DiamondGo/pollmux#五websocket-传输模式) for the underlying transport's design.
+
 ### yamux Multiplexing
 
 Multiple browser connections (tabs, concurrent requests) are multiplexed over a single logical HTTP session using [hashicorp/yamux](https://github.com/hashicorp/yamux). Each browser connection becomes a yamux stream, all sharing the same poll loop.

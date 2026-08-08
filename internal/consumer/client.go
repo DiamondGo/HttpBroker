@@ -39,6 +39,10 @@ type Config struct {
 	// UploadProbeTimeout is passed through to
 	// pollmux.Connector.UploadProbeTimeout; <= 0 uses pollmux's default (15s).
 	UploadProbeTimeout time.Duration
+	// PreferWebSocket is passed through to pollmux.Connector.PreferWebSocket.
+	// Takes effect only if the broker also has EnableWebSocket on; otherwise
+	// negotiation falls back to PollMode as if this were false.
+	PreferWebSocket bool
 }
 
 // Client is the consumer client.
@@ -111,6 +115,7 @@ func (c *Client) Run(ctx context.Context) error {
 				PollGrace:              c.config.PollGrace,
 				UploadStreamPreference: c.config.UploadStreamPreference,
 				UploadProbeTimeout:     c.config.UploadProbeTimeout,
+				PreferWebSocket:        c.config.PreferWebSocket,
 				Logger:                 slogger,
 			}
 			c.logger.Info("connecting to broker",

@@ -3,7 +3,7 @@ module github.com/DiamondGo/HttpBroker
 go 1.25.0
 
 require (
-	github.com/DiamondGo/pollmux v0.1.3
+	github.com/DiamondGo/pollmux v0.1.4
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/yamux v0.1.2
 	github.com/mitchellh/mapstructure v1.5.0
@@ -16,6 +16,7 @@ require (
 )
 
 require (
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

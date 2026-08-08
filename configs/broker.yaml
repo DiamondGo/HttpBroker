@@ -24,6 +24,18 @@ tunnel:
   # poll_mode: "stream"      # "stream" (default) or "batch". Stream mode removes the
                             # batch mode ceiling of one poll_buffer_size per RTT on
                             # downstream throughput.
+  # enable_websocket: false  # Offer pollmux's WebSocket transport (GET /tunnel/{id}/ws)
+                            # to clients that ask for it (transport.prefer_websocket on
+                            # the consumer/provider side). Off by default: needs any
+                            # reverse proxy/CDN in front of the broker to forward
+                            # WebSocket upgrade requests. Worth turning on if stream
+                            # mode's upload direction hangs behind your CDN (observed
+                            # with Cloudflare's standard tiers buffering long-lived
+                            # chunked request bodies) — WebSocket rides one persistent
+                            # connection instead, which such CDNs typically forward
+                            # live. Safe to enable even against older clients: they
+                            # just never ask for it and negotiation falls back to
+                            # poll_mode.
 
 auth:
   enabled: false
