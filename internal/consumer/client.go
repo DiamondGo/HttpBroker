@@ -32,6 +32,13 @@ type Config struct {
 	// reverse proxy/CDN whose own latency can push a stream-mode poll's
 	// response headers past the default 10s.
 	PollGrace time.Duration
+	// UploadStreamPreference is passed through to
+	// pollmux.Connector.UploadStreamPreference: "" (default) auto-detects,
+	// "stream" forces it, "batch" disables it. See that field's doc.
+	UploadStreamPreference string
+	// UploadProbeTimeout is passed through to
+	// pollmux.Connector.UploadProbeTimeout; <= 0 uses pollmux's default (15s).
+	UploadProbeTimeout time.Duration
 }
 
 // Client is the consumer client.
@@ -97,12 +104,14 @@ func (c *Client) Run(ctx context.Context) error {
 					"role":     "consumer",
 					"endpoint": c.config.Endpoint,
 				},
-				PollInterval:       c.config.PollInterval,
-				CoalesceWindow:     c.config.CoalesceWindow,
-				InsecureSkipVerify: c.config.InsecureSkipVerify,
-				PreferStream:       preferStreamMode(c.config.PollMode),
-				PollGrace:          c.config.PollGrace,
-				Logger:             slogger,
+				PollInterval:           c.config.PollInterval,
+				CoalesceWindow:         c.config.CoalesceWindow,
+				InsecureSkipVerify:     c.config.InsecureSkipVerify,
+				PreferStream:           preferStreamMode(c.config.PollMode),
+				PollGrace:              c.config.PollGrace,
+				UploadStreamPreference: c.config.UploadStreamPreference,
+				UploadProbeTimeout:     c.config.UploadProbeTimeout,
+				Logger:                 slogger,
 			}
 			c.logger.Info("connecting to broker",
 				zap.String("broker_url", c.config.BrokerURL),

@@ -76,17 +76,19 @@ func main() {
 			defer stop()
 
 			client := provider.NewClient(provider.Config{
-				BrokerURL:          cfg.Broker.URL,
-				Endpoint:           cfg.Broker.Endpoint,
-				PollInterval:       cfg.Transport.PollInterval,
-				RetryBackoff:       cfg.Transport.RetryBackoff,
-				DialTimeout:        cfg.Provider.DialTimeout,
-				ScrubHeaders:       cfg.Provider.ScrubHeaders,
-				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
-				AuthToken:          cfg.Broker.AuthToken,
-				CoalesceWindow:     cfg.Transport.CoalesceWindow,
-				PollMode:           cfg.Transport.PollMode,
-				PollGrace:          cfg.Transport.PollGrace,
+				BrokerURL:              cfg.Broker.URL,
+				Endpoint:               cfg.Broker.Endpoint,
+				PollInterval:           cfg.Transport.PollInterval,
+				RetryBackoff:           cfg.Transport.RetryBackoff,
+				DialTimeout:            cfg.Provider.DialTimeout,
+				ScrubHeaders:           cfg.Provider.ScrubHeaders,
+				InsecureSkipVerify:     cfg.Broker.InsecureSkipVerify,
+				AuthToken:              cfg.Broker.AuthToken,
+				CoalesceWindow:         cfg.Transport.CoalesceWindow,
+				PollMode:               cfg.Transport.PollMode,
+				PollGrace:              cfg.Transport.PollGrace,
+				UploadStreamPreference: cfg.Transport.UploadStreamPreference,
+				UploadProbeTimeout:     cfg.Transport.UploadProbeTimeout,
 			}, logger)
 
 			logger.Info("starting provider",

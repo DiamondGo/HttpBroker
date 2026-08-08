@@ -76,16 +76,18 @@ func main() {
 			defer stop()
 
 			client := consumer.NewClient(consumer.Config{
-				BrokerURL:          cfg.Broker.URL,
-				Endpoint:           cfg.Broker.Endpoint,
-				Socks5Listen:       cfg.Socks5.Listen,
-				PollInterval:       cfg.Transport.PollInterval,
-				RetryBackoff:       cfg.Transport.RetryBackoff,
-				InsecureSkipVerify: cfg.Broker.InsecureSkipVerify,
-				AuthToken:          cfg.Broker.AuthToken,
-				CoalesceWindow:     cfg.Transport.CoalesceWindow,
-				PollMode:           cfg.Transport.PollMode,
-				PollGrace:          cfg.Transport.PollGrace,
+				BrokerURL:              cfg.Broker.URL,
+				Endpoint:               cfg.Broker.Endpoint,
+				Socks5Listen:           cfg.Socks5.Listen,
+				PollInterval:           cfg.Transport.PollInterval,
+				RetryBackoff:           cfg.Transport.RetryBackoff,
+				InsecureSkipVerify:     cfg.Broker.InsecureSkipVerify,
+				AuthToken:              cfg.Broker.AuthToken,
+				CoalesceWindow:         cfg.Transport.CoalesceWindow,
+				PollMode:               cfg.Transport.PollMode,
+				PollGrace:              cfg.Transport.PollGrace,
+				UploadStreamPreference: cfg.Transport.UploadStreamPreference,
+				UploadProbeTimeout:     cfg.Transport.UploadProbeTimeout,
 			}, logger)
 
 			logger.Info("starting consumer",

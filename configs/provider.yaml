@@ -25,6 +25,15 @@ transport:
                             # all — raise this if the broker sits behind a reverse
                             # proxy/CDN/load balancer whose own latency can exceed
                             # the default 10s. Default 10s if omitted.
+  # upload_stream_preference: ""  # "" (default) auto-detects upload streaming with
+                            # a one-time connect-time probe; "stream" forces it
+                            # without probing (only safe once you've separately
+                            # confirmed every hop forwards a long-lived chunked
+                            # request body live — some proxies, e.g. Cloudflare's
+                            # standard tiers, buffer it instead and hang the tunnel
+                            # outright); "batch" always uses the discrete per-chunk
+                            # send path.
+  # upload_probe_timeout: "15s"  # Bounds the auto-detect probe above. Default 15s.
 
 logging:
   level: "info"

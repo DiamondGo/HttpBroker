@@ -19,10 +19,10 @@ type BrokerConfig struct {
 
 // ServerConfig holds HTTP server settings.
 type ServerConfig struct {
-	Listen                string                      `mapstructure:"listen"`
-	TLS                   TLSConfig                   `mapstructure:"tls"`
-	StatusEndpointEnabled bool                        `mapstructure:"status_endpoint_enabled"` // Whether to expose GET /status endpoint (default: false)
-	UnauthorizedRedirect  UnauthorizedRedirectConfig  `mapstructure:"unauthorized_redirect"`   // Redirect settings for unauthorized requests
+	Listen                string                     `mapstructure:"listen"`
+	TLS                   TLSConfig                  `mapstructure:"tls"`
+	StatusEndpointEnabled bool                       `mapstructure:"status_endpoint_enabled"` // Whether to expose GET /status endpoint (default: false)
+	UnauthorizedRedirect  UnauthorizedRedirectConfig `mapstructure:"unauthorized_redirect"`   // Redirect settings for unauthorized requests
 }
 
 // TLSConfig holds TLS certificate paths.
@@ -120,6 +120,22 @@ type TransportConfig struct {
 	// needs this raised — the default (pollmux.DefaultPollGrace, 10s) can be
 	// too tight for that extra hop. Zero/unset uses the pollmux default.
 	PollGrace time.Duration `mapstructure:"poll_grace"`
+	// UploadStreamPreference controls the upload direction (this client ->
+	// broker) independently of PollMode, which only governs the download
+	// direction: "" (default) auto-detects once at connect time via a probe
+	// bounded by UploadProbeTimeout; "stream" always uses upload streaming
+	// once the broker offers it, skipping the probe — only safe once you've
+	// separately confirmed every hop between this client and the broker
+	// forwards a long-lived chunked request body live; "batch" never uses
+	// it. Auto-detect exists because some intermediate proxies (observed
+	// with Cloudflare's standard tiers in production) buffer a long-lived
+	// chunked request body instead of forwarding it live, which hangs the
+	// tunnel outright rather than just being slow — see pollmux's README
+	// ("连接期自动探测") for the full story.
+	UploadStreamPreference string `mapstructure:"upload_stream_preference"`
+	// UploadProbeTimeout bounds the auto-detect probe run when
+	// UploadStreamPreference is "". Zero/unset uses pollmux's default (15s).
+	UploadProbeTimeout time.Duration `mapstructure:"upload_probe_timeout"`
 }
 
 // ProviderConfig holds configuration for the provider (Machine C).
