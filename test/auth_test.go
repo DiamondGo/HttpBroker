@@ -145,4 +145,3 @@ func TestAuthenticationFailure(t *testing.T) {
 		t.Logf("Provider failed with error (expected): %v", err)
 	}
 }
-

@@ -206,7 +206,19 @@ func (c *Client) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		c.logger.Info("consumer shutting down", zap.String("endpoint", c.config.Endpoint))
 	}
-	return err
+
+	// Close any TCP connections that queued up while the last session was
+	// winding down; nothing will serve them from here on, and leaving them
+	// open would hang their clients (e.g. a browser sitting on an
+	// established-but-never-handshaken SOCKS5 connection).
+	for {
+		select {
+		case nc := <-connQueue:
+			nc.Close()
+		default:
+			return err
+		}
+	}
 }
 
 // acceptLoop continuously accepts TCP connections from listener and sends them

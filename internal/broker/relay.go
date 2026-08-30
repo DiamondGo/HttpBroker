@@ -43,12 +43,21 @@ func (r *Relay) HandleProvider(session *brokerSession) {
 		)
 		return
 	}
+	// Only a provider that actually got registered may remove the endpoint's
+	// provider on exit. Without this, a duplicate provider (SetProvider
+	// rejected because one is already active) would still run RemoveProvider
+	// in its deferred cleanup, evicting the *active* provider's registration
+	// and tearing down every consumer tunnel on the endpoint.
+	registered := false
 	defer func() {
 		yamuxSess.Close()
+		if !registered {
+			return
+		}
 		// RemoveProvider closes all consumer yamux sessions for this endpoint,
 		// causing each consumer to detect the disconnection and re-register.
 		// It also unblocks any bridgeStream goroutines waiting in WaitForProvider.
-		r.registry.RemoveProvider(session.Endpoint)
+		r.registry.RemoveProvider(session.Endpoint, session.ID)
 		r.logger.Info("provider disconnected — notified all consumers to reconnect",
 			zap.String("session_id", session.ID),
 			zap.String("endpoint", session.Endpoint),
@@ -64,6 +73,7 @@ func (r *Relay) HandleProvider(session *brokerSession) {
 		)
 		return
 	}
+	registered = true
 
 	// Notify any bridgeStream goroutines waiting for a provider to arrive.
 	r.registry.NotifyProviderArrived(session.Endpoint)

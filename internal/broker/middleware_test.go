@@ -10,7 +10,7 @@ import (
 func TestNoopAuthenticator(t *testing.T) {
 	auth := &NoopAuthenticator{}
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	
+
 	err := auth.Authenticate(req)
 	if err != nil {
 		t.Errorf("NoopAuthenticator should always return nil, got: %v", err)
@@ -20,10 +20,10 @@ func TestNoopAuthenticator(t *testing.T) {
 func TestTokenAuthenticator_ValidToken(t *testing.T) {
 	token := "test-token-123"
 	auth := NewTokenAuthenticator(token)
-	
+
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	
+
 	err := auth.Authenticate(req)
 	if err != nil {
 		t.Errorf("TokenAuthenticator should accept valid token, got error: %v", err)
@@ -32,10 +32,10 @@ func TestTokenAuthenticator_ValidToken(t *testing.T) {
 
 func TestTokenAuthenticator_InvalidToken(t *testing.T) {
 	auth := NewTokenAuthenticator("correct-token")
-	
+
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer wrong-token")
-	
+
 	err := auth.Authenticate(req)
 	if err == nil {
 		t.Error("TokenAuthenticator should reject invalid token")
@@ -44,9 +44,9 @@ func TestTokenAuthenticator_InvalidToken(t *testing.T) {
 
 func TestTokenAuthenticator_MissingHeader(t *testing.T) {
 	auth := NewTokenAuthenticator("test-token")
-	
+
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
-	
+
 	err := auth.Authenticate(req)
 	if err == nil {
 		t.Error("TokenAuthenticator should reject request without Authorization header")
@@ -55,7 +55,7 @@ func TestTokenAuthenticator_MissingHeader(t *testing.T) {
 
 func TestTokenAuthenticator_WrongFormat(t *testing.T) {
 	auth := NewTokenAuthenticator("test-token")
-	
+
 	testCases := []struct {
 		name   string
 		header string
@@ -64,12 +64,12 @@ func TestTokenAuthenticator_WrongFormat(t *testing.T) {
 		{"Wrong prefix", "Basic test-token"},
 		{"Empty token", "Bearer "},
 	}
-	
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/test", nil)
 			req.Header.Set("Authorization", tc.header)
-			
+
 			err := auth.Authenticate(req)
 			if err == nil {
 				t.Errorf("TokenAuthenticator should reject malformed header: %s", tc.header)
@@ -171,10 +171,10 @@ func TestAuthMiddleware(t *testing.T) {
 // TestBuildRedirectURL tests the buildRedirectURL function
 func TestBuildRedirectURL(t *testing.T) {
 	testCases := []struct {
-		name           string
-		configuredURL  string
-		requestScheme  string // "http" or "https"
-		expectedURL    string
+		name          string
+		configuredURL string
+		requestScheme string // "http" or "https"
+		expectedURL   string
 	}{
 		{
 			name:          "Same-site path",
@@ -230,3 +230,33 @@ func TestBuildRedirectURL(t *testing.T) {
 	}
 }
 
+// TestBuildRedirectURLXForwardedProto checks the client-controlled
+// X-Forwarded-Proto header: only "http"/"https" may influence the Location
+// scheme, anything else (attacker-controlled garbage) is ignored.
+func TestBuildRedirectURLXForwardedProto(t *testing.T) {
+	testCases := []struct {
+		name     string
+		proto    string
+		expected string
+	}{
+		{"https proto", "https", "https://www.example.com"},
+		{"http proto", "http", "http://www.example.com"},
+		{"weird scheme ignored", "javascript", "http://www.example.com"},
+		{"uppercase normalized", "HTTPS", "https://www.example.com"},
+		{"empty proto ignored", "", "http://www.example.com"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/test", nil)
+			if tc.proto != "" {
+				req.Header.Set("X-Forwarded-Proto", tc.proto)
+			}
+
+			result := buildRedirectURL("www.example.com", req)
+			if result != tc.expected {
+				t.Errorf("expected %q, got %q", tc.expected, result)
+			}
+		})
+	}
+}

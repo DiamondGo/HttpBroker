@@ -59,6 +59,12 @@ func main() {
 			if cfg.Server.Listen == "" {
 				cfg.Server.Listen = ":8080"
 			}
+
+			// Fail fast on half-configured TLS instead of dying inside
+			// ListenAndServeTLS with an obscure cert/key error.
+			if cfg.Server.TLS.Enabled && (cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "") {
+				return fmt.Errorf("TLS is enabled but tls.cert_file/tls.key_file are not both set")
+			}
 			// PollTimeout/SessionTimeout/PollBufferSize/MaxSendBytes/HighWaterWarn
 			// are left at zero when unset in config — pollmux.ServerConfig falls
 			// back to its own documented defaults for each. PollMode defaults to

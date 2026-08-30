@@ -404,7 +404,7 @@ ssh internal-server
 
 ## Configuration
 
-Each binary reads a YAML config file and supports CLI flag overrides. CLI flags take precedence over config file values.
+Each binary reads a YAML config file and supports CLI flag overrides. CLI flags take precedence over config file values. **The config file is optional**: if it doesn't exist (e.g. you run the binary from a different directory), the built-in defaults plus your CLI flags are used. A file that exists but fails to parse is an error.
 
 ### Broker (`configs/broker.yaml`)
 
@@ -421,8 +421,15 @@ server:
     url: ""                # Redirect target URL (see below for format options)
 
 tunnel:
-  poll_timeout: "5s"       # How long to hold a poll request before returning empty
-  session_timeout: "5m"    # Disconnect sessions idle longer than this
+  poll_timeout: "30s"      # How long to hold a poll request before returning empty
+  session_timeout: "60s"   # Disconnect sessions idle longer than this (must be >= 2x poll_timeout)
+  # Advanced transport tuning (all optional, pollmux defaults shown):
+  # coalesce_window: "2ms"   # How long a poll response waits for more data once any is available
+  # poll_buffer_size: 262144 # Bytes per long-poll response (256KiB)
+  # max_send_bytes: 1048576  # Cap on a single request body (1MiB)
+  # high_water_warn: 0       # Log once when a session buffers this many bytes (0 = off)
+  # poll_mode: "stream"      # "stream" (default) or "batch" (older discrete request/response)
+  # enable_websocket: false  # Offer the WebSocket transport to clients that ask for it
 
 auth:
   enabled: false           # Enable Bearer token authentication
@@ -457,6 +464,13 @@ socks5:
 transport:
   poll_interval: "50ms"             # Delay between poll requests
   retry_backoff: "5s"               # Wait time before reconnecting on error
+  # Advanced transport tuning (all optional, defaults in comments):
+  # coalesce_window: "2ms"   # How long Write() waits before the first send of a burst
+  # poll_mode: "stream"      # "stream" (default) or "batch"; falls back silently on old brokers
+  # poll_grace: "10s"        # Extra response-header wait for proxies/CDNs in front of the broker
+  # upload_stream_preference: ""  # "" auto-detects (default); "stream" forces; "batch" disables
+  # upload_probe_timeout: "15s"   # Bounds the auto-detect probe
+  # prefer_websocket: false  # Ask for the WebSocket transport (needs broker enable_websocket too)
 
 logging:
   level: "info"                     # Log level: debug, info, warn, error
@@ -478,6 +492,7 @@ provider:
 transport:
   poll_interval: "50ms"             # Delay between poll requests
   retry_backoff: "5s"               # Wait time before reconnecting on error
+  # Advanced transport tuning: same options as the Consumer's transport block
 
 logging:
   level: "info"                     # Log level: debug, info, warn, error
@@ -522,11 +537,12 @@ Usage:
   httpbroker-broker [flags]
 
 Flags:
-  -c, --config string    path to config file (default "configs/broker.yaml")
-      --listen string    override listen address (e.g. :8080)
-      --tls-cert string  TLS certificate file
-      --tls-key string   TLS key file
-  -h, --help             help for httpbroker-broker
+  -c, --config string        path to config file (default "configs/broker.yaml")
+      --enable-status        enable GET /status endpoint
+      --listen string        override listen address (e.g. :8080)
+      --tls-cert string      TLS certificate file
+      --tls-key string       TLS key file
+  -h, --help                 help for httpbroker-broker
 ```
 
 ### httpbroker-consumer
@@ -538,11 +554,12 @@ Usage:
   httpbroker-consumer [flags]
 
 Flags:
-  -c, --config string         path to config file (default "configs/consumer.yaml")
-      --broker-url string     broker URL (e.g. http://192.168.1.100:8080)
-      --endpoint string       endpoint name
-      --socks5-listen string  SOCKS5 listen address (e.g. :1080)
-  -h, --help                  help for httpbroker-consumer
+  -c, --config string                 path to config file (default "configs/consumer.yaml")
+      --broker-url string             broker URL (e.g. http://192.168.1.100:8080)
+      --endpoint string               endpoint name
+      --insecure-skip-verify          skip TLS certificate verification (self-signed certs)
+      --socks5-listen string          SOCKS5 listen address (e.g. :1080)
+  -h, --help                          help for httpbroker-consumer
 ```
 
 ### httpbroker-provider
@@ -554,11 +571,12 @@ Usage:
   httpbroker-provider [flags]
 
 Flags:
-  -c, --config string      path to config file (default "configs/provider.yaml")
-      --broker-url string  broker URL
-      --endpoint string    endpoint name
-      --scrub-headers      strip proxy headers from HTTP requests (default false)
-  -h, --help               help for httpbroker-provider
+  -c, --config string             path to config file (default "configs/provider.yaml")
+      --broker-url string         broker URL
+      --endpoint string           endpoint name
+      --insecure-skip-verify      skip TLS certificate verification (self-signed certs)
+      --scrub-headers             strip proxy headers from HTTP requests (default false)
+  -h, --help                      help for httpbroker-provider
 ```
 
 ## Architecture
@@ -574,11 +592,16 @@ internal/
   broker/       → Broker server, endpoint registry, relay logic
   consumer/     → SOCKS5 server, yamux client, tunnel dialer
   provider/     → Provider client, target dialer, header scrubber
-  transport/    → HTTP long-poll transport, pipe-based session, httpconn adapter
   config/       → YAML config loading, logger setup
 configs/        → Example YAML configuration files
+test/           → Unit-level auth tests (separate Go module)
 plans/          → Architecture documentation
 ```
+
+The HTTP long-poll transport itself lives in the external
+[pollmux](https://github.com/DiamondGo/pollmux) library (see
+`MIGRATION_POLLMUX.md` for the migration notes); the packages above only deal
+in its `Conn`/`Session` abstraction and the application topology on top of it.
 
 For a detailed technical design, see [plans/architecture.md](plans/architecture.md).
 
@@ -606,6 +629,10 @@ For a detailed technical design, see [plans/architecture.md](plans/architecture.
 - **DNS Privacy**: DNS queries are resolved on the Provider (Machine C). This means your local DNS resolver never sees the domains you visit through the tunnel, but the Provider's DNS resolver does.
 
 - **Endpoint Naming**: Endpoint names help organize multiple tunnels. When authentication is disabled, anyone who knows the Broker URL and endpoint name can connect. Enable authentication to secure your Broker.
+
+- **Provider Reachability (SSRF by design)**: The Provider dials whatever host:port the Consumer requests, on the Provider's own network. Anyone who can reach the Broker (when auth is disabled) or who holds the token can therefore reach every host the Provider can — including link-local services. Treat the token as granting full network access from the Provider's vantage point.
+
+- **Unauthenticated Broker Hardening**: Even without auth, the broker validates the `role`/`endpoint` metadata, caps endpoint name length (128 bytes) and the total number of distinct endpoints (1024), and enforces a 30s request-header read timeout to keep slow-trickle connections from pinning goroutines.
 
 ## Raspberry Pi Deployment
 

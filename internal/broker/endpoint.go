@@ -24,6 +24,15 @@ type Endpoint struct {
 	cond *sync.Cond // broadcast when provider connects or disconnects
 }
 
+// maxEndpoints caps how many distinct endpoints may exist at once. Endpoint
+// names are attacker-controllable whenever auth is disabled (they come from
+// the connect request's meta), so without a cap an unauthenticated client
+// could grow the registry unbounded by connecting with fresh names.
+const maxEndpoints = 1024
+
+// maxEndpointNameLen caps a single endpoint name's length for the same reason.
+const maxEndpointNameLen = 128
+
 // EndpointRegistry manages all named endpoints. Session lifecycle (creation,
 // lookup, expiry) is entirely owned by pollmux.SessionStore; this registry is
 // a derived topology view — which endpoint has a provider, which consumers
@@ -41,12 +50,18 @@ func NewEndpointRegistry() *EndpointRegistry {
 }
 
 // GetOrCreate returns the endpoint with the given name, creating it if needed.
-func (r *EndpointRegistry) GetOrCreate(name string) *Endpoint {
+// It returns an error when creating a *new* endpoint would exceed maxEndpoints
+// (existing endpoints are always returned, so in-flight streams keep working).
+func (r *EndpointRegistry) GetOrCreate(name string) (*Endpoint, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if ep, ok := r.endpoints[name]; ok {
-		return ep
+		return ep, nil
+	}
+
+	if len(r.endpoints) >= maxEndpoints {
+		return nil, fmt.Errorf("endpoint limit of %d reached", maxEndpoints)
 	}
 
 	ep := &Endpoint{
@@ -57,7 +72,7 @@ func (r *EndpointRegistry) GetOrCreate(name string) *Endpoint {
 	// cond uses its own dedicated mutex so it doesn't conflict with ep.mu.
 	ep.cond = sync.NewCond(&sync.Mutex{})
 	r.endpoints[name] = ep
-	return ep
+	return ep, nil
 }
 
 // SetProvider registers a provider session for an endpoint.
@@ -67,7 +82,10 @@ func (r *EndpointRegistry) SetProvider(
 	session *brokerSession,
 	yamuxSess *yamux.Session,
 ) error {
-	ep := r.GetOrCreate(endpointName)
+	ep, err := r.GetOrCreate(endpointName)
+	if err != nil {
+		return err
+	}
 
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
@@ -112,8 +130,12 @@ func (r *EndpointRegistry) WaitForProvider(
 		return ys, true
 	}
 
-	// Slow path: wait for provider to arrive.
-	ep := r.GetOrCreate(endpointName)
+	// Slow path: wait for provider to arrive. If the endpoint table is full
+	// (maxEndpoints hit by another client), there is nothing to wait on.
+	ep, err := r.GetOrCreate(endpointName)
+	if err != nil {
+		return nil, false
+	}
 
 	// We need to wake the cond.Wait() when done fires. Use a background
 	// goroutine that broadcasts on the cond when done closes.
@@ -160,7 +182,12 @@ func (r *EndpointRegistry) WaitForProvider(
 // RemoveProvider removes the provider from an endpoint and closes all consumer
 // yamux sessions so that consumers detect the disconnection immediately.
 // The consumerYamuxSessions map is cleared so stale entries don't accumulate.
-func (r *EndpointRegistry) RemoveProvider(endpointName string) {
+//
+// sessionID identifies which provider is leaving: the provider fields are only
+// cleared when they still belong to that session, so a second (duplicate)
+// provider whose registration was rejected can never wipe out the active
+// provider's bookkeeping.
+func (r *EndpointRegistry) RemoveProvider(endpointName, sessionID string) {
 	r.mu.RLock()
 	ep, ok := r.endpoints[endpointName]
 	r.mu.RUnlock()
@@ -170,6 +197,11 @@ func (r *EndpointRegistry) RemoveProvider(endpointName string) {
 	}
 
 	ep.mu.Lock()
+	if ep.ProviderSession != nil && ep.ProviderSession.ID != sessionID {
+		// A different provider owns this endpoint now; leave it alone.
+		ep.mu.Unlock()
+		return
+	}
 	ep.ProviderSession = nil
 	ep.ProviderYamux = nil
 
@@ -222,13 +254,22 @@ func (r *EndpointRegistry) Forget(sessionID, role, endpoint string) {
 	}
 }
 
-// AddConsumer registers a consumer session.
-func (r *EndpointRegistry) AddConsumer(endpointName string, session *brokerSession) {
-	ep := r.GetOrCreate(endpointName)
+// AddConsumer registers a consumer session. It returns an error when the
+// endpoint table is full, so the caller (the connect hook) can reject the
+// session instead of leaking it into a half-registered state.
+func (r *EndpointRegistry) AddConsumer(
+	endpointName string,
+	session *brokerSession,
+) error {
+	ep, err := r.GetOrCreate(endpointName)
+	if err != nil {
+		return err
+	}
 
 	ep.mu.Lock()
 	ep.ConsumerSessions[session.ID] = session
 	ep.mu.Unlock()
+	return nil
 }
 
 // RegisterConsumerYamux stores the consumer's yamux session so it can be

@@ -45,6 +45,25 @@ type brokerSession struct {
 	Endpoint string
 }
 
+// brokenPollGrace is how long a session may stay quiet after a poll request
+// ended with its TCP connection dropped (the client, or an intermediate
+// proxy, died mid-poll) before the fast reaper evicts it. A healthy client
+// re-polls promptly — its stream-mode idle watchdog reopens a poll within
+// HeartbeatInterval+grace even when an intermediate proxy swallows the
+// response — so this only needs to absorb reconnection latency. A session
+// evicted this way answers 404/410 to its late re-poll, which pollmux clients
+// treat as a normal reconnect trigger.
+//
+// Without this, a dead client's session lingers until pollmux's own sweeper
+// expires it after the full session_timeout (default 60s). For a dead
+// provider that is a 60-second tunnel blackout: its registration keeps
+// rejecting the replacement provider the whole time.
+const brokenPollGrace = 5 * time.Second
+
+// fastReaperInterval is how often the fast reaper scans for broken-poll
+// sessions that have passed brokenPollGrace.
+const fastReaperInterval = 2 * time.Second
+
 // Server is the broker HTTP server.
 type Server struct {
 	config      Config
@@ -58,6 +77,83 @@ type Server struct {
 	stopSweeper func()
 	stopOnce    sync.Once // ensures Stop() is idempotent
 	version     string    // broker version
+
+	// brokenPolls records, per session id, when a poll request last ended
+	// with its TCP connection dropped. The fast reaper evicts entries that
+	// age past brokenPollGrace while the session has no poll in flight.
+	brokenPollsMu sync.Mutex
+	brokenPolls   map[string]time.Time
+}
+
+// markBrokenPoll records that session id's poll request just ended with its
+// TCP connection dropped. No-op for unknown or already-closed sessions.
+func (s *Server) markBrokenPoll(r *http.Request) {
+	id := s.pcfg.SessionIDFunc(r)
+	sess, ok := s.store.Get(id)
+	if !ok || sess.IsClosed() {
+		return
+	}
+	s.brokenPollsMu.Lock()
+	s.brokenPolls[sess.ID] = time.Now()
+	s.brokenPollsMu.Unlock()
+}
+
+// startFastReaper runs the broken-poll reaper until stop is closed. It is a
+// fast path on top of pollmux's own sweeper, which stays as the backstop for
+// sessions that never had a broken poll (e.g. a client that died between
+// polls).
+func (s *Server) startFastReaper(stop <-chan struct{}) {
+	go func() {
+		ticker := time.NewTicker(fastReaperInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				s.sweepBrokenPolls()
+			}
+		}
+	}()
+}
+
+// sweepBrokenPolls evicts every session whose last broken poll is older than
+// brokenPollGrace and which has no poll in flight (a re-poll already landed).
+func (s *Server) sweepBrokenPolls() {
+	now := time.Now()
+
+	type dueSession struct {
+		sess *pollmux.Session
+		at   time.Time
+	}
+
+	s.brokenPollsMu.Lock()
+	var due []dueSession
+	for id, at := range s.brokenPolls {
+		if now.Sub(at) < brokenPollGrace {
+			continue
+		}
+		sess, ok := s.store.Get(id)
+		if !ok || sess.IsClosed() {
+			delete(s.brokenPolls, id)
+			continue
+		}
+		if sess.PollInFlight() > 0 {
+			continue // the client re-poll landed; it is alive
+		}
+		delete(s.brokenPolls, id)
+		due = append(due, dueSession{sess: sess, at: at})
+	}
+	s.brokenPollsMu.Unlock()
+
+	for _, d := range due {
+		s.logger.Info("evicting session whose poll connection dropped",
+			zap.String("session_id", d.sess.ID),
+			zap.String("role", d.sess.Meta()["role"]),
+			zap.String("endpoint", d.sess.Meta()["endpoint"]),
+			zap.Duration("quiet_for", now.Sub(d.at)))
+		pollmux.CloseSession(s.store, s.hooks, d.sess, pollmux.ReasonServerClose)
+	}
 }
 
 // resolvePollMode maps Config.PollMode to the pollmux.ServerConfig.PollMode
@@ -80,12 +176,13 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 	slogger := slog.New(zapslog.NewHandler(logger.Core()))
 
 	s := &Server{
-		config:   config,
-		registry: registry,
-		relay:    relay,
-		logger:   logger,
-		store:    store,
-		version:  config.Version,
+		config:      config,
+		registry:    registry,
+		relay:       relay,
+		logger:      logger,
+		store:       store,
+		version:     config.Version,
+		brokenPolls: make(map[string]time.Time),
 	}
 
 	s.pcfg = pollmux.ServerConfig{
@@ -128,10 +225,19 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
 			pollmux.ConnectHandler(store, s.pcfg, s.hooks))).
 		Methods("POST")
+	pollHandler := pollmux.PollHandler(store, s.pcfg, s.hooks)
 	router.Handle("/tunnel/{id}/poll",
 		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
-			pollmux.PollHandler(store, s.pcfg, s.hooks))).
-		Methods("POST")
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				pollHandler.ServeHTTP(w, r)
+				// A poll request that ends with its context cancelled had its
+				// TCP connection dropped underneath it: the client (or an
+				// intermediate proxy) is gone. Mark it so the fast reaper can
+				// evict the session long before session_timeout.
+				if r.Context().Err() != nil {
+					s.markBrokenPoll(r)
+				}
+			}))).Methods("POST")
 	router.Handle("/tunnel/{id}",
 		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
 			pollmux.DeleteHandler(store, s.pcfg, s.hooks))).
@@ -158,8 +264,15 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 	}
 
 	s.httpSrv = &http.Server{
-		Addr:    config.ListenAddr,
-		Handler: router,
+		Addr: config.ListenAddr,
+		// ReadHeaderTimeout bounds how long a client may take sending request
+		// headers, so a slow trickle of header bytes (Slowloris-style) cannot
+		// pin a goroutine per connection forever. Read/Write timeouts stay
+		// unset on purpose: long polls hold their requests and responses open
+		// for up to poll_timeout, and stream mode keeps request bodies open
+		// for the life of the tunnel.
+		ReadHeaderTimeout: 30 * time.Second,
+		Handler:           router,
 	}
 
 	return s
@@ -181,6 +294,11 @@ func (s *Server) authenticateConnect(
 		return nil, pollmux.StatusErrorf(http.StatusBadRequest,
 			"role must be 'consumer' or 'provider', got %q", role)
 	}
+	if len(endpoint) > maxEndpointNameLen {
+		return nil, pollmux.StatusErrorf(http.StatusBadRequest,
+			"endpoint name too long (%d bytes, max %d)",
+			len(endpoint), maxEndpointNameLen)
+	}
 	return nil, nil
 }
 
@@ -192,7 +310,9 @@ func (s *Server) onConnect(sess *pollmux.Session, meta map[string]string) error 
 	if bs.Role == "provider" {
 		go s.relay.HandleProvider(bs)
 	} else {
-		s.registry.AddConsumer(bs.Endpoint, bs)
+		if err := s.registry.AddConsumer(bs.Endpoint, bs); err != nil {
+			return err
+		}
 		go s.relay.HandleConsumer(bs)
 	}
 
@@ -217,10 +337,14 @@ func (s *Server) onDisconnect(sess *pollmux.Session, reason pollmux.DisconnectRe
 	)
 }
 
-// Start starts the HTTP server and the session sweeper.
-// Blocks until the server stops.
+// Start starts the HTTP server, the session sweeper, and the broken-poll
+// fast reaper. Blocks until the server stops.
 func (s *Server) Start() error {
 	s.stopSweeper = pollmux.StartSweeper(s.store, s.pcfg, s.hooks)
+
+	reaperStop := make(chan struct{})
+	s.startFastReaper(reaperStop)
+	defer close(reaperStop)
 
 	s.logger.Info("broker server starting", zap.String("addr", s.config.ListenAddr))
 
