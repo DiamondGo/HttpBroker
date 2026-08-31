@@ -118,9 +118,9 @@ func (s *Server) startFastReaper(stop <-chan struct{}) {
 }
 
 // sweepBrokenPolls evicts every session whose last broken poll is older than
-// brokenPollGrace and which has no poll in flight. A session that already
-// has a re-poll in flight is considered alive: its brokenPolls entry is
-// dropped so a later sweep cannot evict it after that poll completes.
+// brokenPollGrace and which has no poll or persistent transport in flight.
+// pollmux performs the idle check and close atomically, so a re-poll racing
+// this scan either attaches first and survives, or observes the closed session.
 func (s *Server) sweepBrokenPolls() {
 	now := time.Now()
 
@@ -140,22 +140,22 @@ func (s *Server) sweepBrokenPolls() {
 			delete(s.brokenPolls, id)
 			continue
 		}
-		if sess.PollInFlight() > 0 {
-			delete(s.brokenPolls, id)
-			continue // the client re-poll landed; it is alive
-		}
 		delete(s.brokenPolls, id)
 		due = append(due, dueSession{sess: sess, at: at})
 	}
 	s.brokenPollsMu.Unlock()
 
 	for _, d := range due {
-		s.logger.Info("evicting session whose poll connection dropped",
+		if !pollmux.CloseSessionIfNoPollInFlight(
+			s.store, s.hooks, d.sess, pollmux.ReasonServerClose,
+		) {
+			continue
+		}
+		s.logger.Info("evicted session whose poll connection dropped",
 			zap.String("session_id", d.sess.ID),
 			zap.String("role", d.sess.Meta()["role"]),
 			zap.String("endpoint", d.sess.Meta()["endpoint"]),
 			zap.Duration("quiet_for", now.Sub(d.at)))
-		pollmux.CloseSession(s.store, s.hooks, d.sess, pollmux.ReasonServerClose)
 	}
 }
 

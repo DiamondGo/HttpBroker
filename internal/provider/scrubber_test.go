@@ -48,7 +48,8 @@ func TestScrubConn_StripsProxyHeaders(t *testing.T) {
 	inner := &fakeConn{}
 	s := NewScrubConn(inner)
 
-	req := "GET /index.html HTTP/1.1\r\nHost: example.com\r\nX-Forwarded-For: 1.2.3.4\r\nVia: proxy1\r\nUser-Agent: test\r\n\r\n"
+	req := "GET /index.html HTTP/1.1\r\nHost: example.com\r\n" +
+		"X-Forwarded-For: 1.2.3.4\r\nVia: proxy1\r\nUser-Agent: test\r\n\r\n"
 	if err := writeAll(s, req); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -145,7 +146,8 @@ func TestScrubConn_ChunkedBodyPassesThrough(t *testing.T) {
 	inner := &fakeConn{}
 	s := NewScrubConn(inner)
 
-	req := "POST /chunked HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\nVia: proxy1\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+	req := "POST /chunked HTTP/1.1\r\nHost: example.com\r\n" +
+		"Transfer-Encoding: chunked\r\nVia: proxy1\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
 	if err := writeAll(s, req); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -192,6 +194,38 @@ func TestScrubConn_HostileHeadersSplitAcrossWrites(t *testing.T) {
 	want := "GET /x HTTP/1.1\r\nHost: example.com\r\n\r\n"
 	if got != want {
 		t.Fatalf("scrubbed output:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestScrubConn_PartialMethodMismatchPassesThrough verifies a non-HTTP stream
+// that initially resembles a method is flushed as soon as the prefix diverges.
+func TestScrubConn_PartialMethodMismatchPassesThrough(t *testing.T) {
+	for _, parts := range [][]string{
+		{"G", "RPC binary payload"},
+		{"GE", "neric protocol payload"},
+	} {
+		t.Run(strings.Join(parts, "+"), func(t *testing.T) {
+			inner := &fakeConn{}
+			s := NewScrubConn(inner)
+
+			if err := writeAll(s, parts[0]); err != nil {
+				t.Fatalf("write prefix: %v", err)
+			}
+			if len(inner.written()) != 0 {
+				t.Fatal("ambiguous method prefix should initially be buffered")
+			}
+			if err := writeAll(s, parts[1]); err != nil {
+				t.Fatalf("write mismatch: %v", err)
+			}
+
+			want := strings.Join(parts, "")
+			if got := string(inner.written()); got != want {
+				t.Fatalf("pass-through output = %q, want %q", got, want)
+			}
+			if !s.passThrough {
+				t.Fatal("method mismatch did not switch to pass-through")
+			}
+		})
 	}
 }
 

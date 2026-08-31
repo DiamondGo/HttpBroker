@@ -14,6 +14,7 @@ type Endpoint struct {
 	ProviderSession  *brokerSession            // nil if no provider connected
 	ProviderYamux    *yamux.Session            // yamux client toward provider
 	ConsumerSessions map[string]*brokerSession // session ID -> consumer session
+	waiters          int                       // streams currently waiting for a provider
 
 	// consumerYamuxSessions tracks all active consumer yamux sessions for this
 	// endpoint so that when the provider disconnects we can close them all,
@@ -55,11 +56,14 @@ func NewEndpointRegistry() *EndpointRegistry {
 func (r *EndpointRegistry) GetOrCreate(name string) (*Endpoint, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.getOrCreateLocked(name)
+}
 
+// getOrCreateLocked is GetOrCreate with r.mu already held.
+func (r *EndpointRegistry) getOrCreateLocked(name string) (*Endpoint, error) {
 	if ep, ok := r.endpoints[name]; ok {
 		return ep, nil
 	}
-
 	if len(r.endpoints) >= maxEndpoints {
 		return nil, fmt.Errorf("endpoint limit of %d reached", maxEndpoints)
 	}
@@ -75,6 +79,17 @@ func (r *EndpointRegistry) GetOrCreate(name string) (*Endpoint, error) {
 	return ep, nil
 }
 
+// deleteIfEmptyLocked reclaims an unused endpoint. Both r.mu and ep.mu must be
+// held so no concurrent registration can retain an orphaned endpoint pointer.
+func (r *EndpointRegistry) deleteIfEmptyLocked(name string, ep *Endpoint) {
+	if ep.ProviderSession == nil && len(ep.ConsumerSessions) == 0 &&
+		len(ep.consumerYamuxSessions) == 0 && ep.waiters == 0 {
+		if r.endpoints[name] == ep {
+			delete(r.endpoints, name)
+		}
+	}
+}
+
 // SetProvider registers a provider session for an endpoint.
 // Returns error if a provider is already registered.
 func (r *EndpointRegistry) SetProvider(
@@ -82,7 +97,9 @@ func (r *EndpointRegistry) SetProvider(
 	session *brokerSession,
 	yamuxSess *yamux.Session,
 ) error {
-	ep, err := r.GetOrCreate(endpointName)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ep, err := r.getOrCreateLocked(endpointName)
 	if err != nil {
 		return err
 	}
@@ -130,12 +147,26 @@ func (r *EndpointRegistry) WaitForProvider(
 		return ys, true
 	}
 
-	// Slow path: wait for provider to arrive. If the endpoint table is full
-	// (maxEndpoints hit by another client), there is nothing to wait on.
-	ep, err := r.GetOrCreate(endpointName)
+	// Slow path: acquire a waiter reference while holding the registry lock so
+	// cleanup cannot remove this endpoint and leave us waiting on an orphan.
+	r.mu.Lock()
+	ep, err := r.getOrCreateLocked(endpointName)
 	if err != nil {
+		r.mu.Unlock()
 		return nil, false
 	}
+	ep.mu.Lock()
+	ep.waiters++
+	ep.mu.Unlock()
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		ep.mu.Lock()
+		ep.waiters--
+		r.deleteIfEmptyLocked(endpointName, ep)
+		ep.mu.Unlock()
+		r.mu.Unlock()
+	}()
 
 	// We need to wake the cond.Wait() when done fires. Use a background
 	// goroutine that broadcasts on the cond when done closes.
@@ -188,11 +219,10 @@ func (r *EndpointRegistry) WaitForProvider(
 // provider whose registration was rejected can never wipe out the active
 // provider's bookkeeping.
 func (r *EndpointRegistry) RemoveProvider(endpointName, sessionID string) {
-	r.mu.RLock()
+	r.mu.Lock()
 	ep, ok := r.endpoints[endpointName]
-	r.mu.RUnlock()
-
 	if !ok {
+		r.mu.Unlock()
 		return
 	}
 
@@ -200,6 +230,7 @@ func (r *EndpointRegistry) RemoveProvider(endpointName, sessionID string) {
 	if ep.ProviderSession != nil && ep.ProviderSession.ID != sessionID {
 		// A different provider owns this endpoint now; leave it alone.
 		ep.mu.Unlock()
+		r.mu.Unlock()
 		return
 	}
 	ep.ProviderSession = nil
@@ -214,7 +245,9 @@ func (r *EndpointRegistry) RemoveProvider(endpointName, sessionID string) {
 	// Clear the map — consumers will re-register when they reconnect.
 	ep.consumerYamuxSessions = make(map[string]*yamux.Session)
 	ep.ConsumerSessions = make(map[string]*brokerSession)
+	r.deleteIfEmptyLocked(endpointName, ep)
 	ep.mu.Unlock()
+	r.mu.Unlock()
 
 	// Close all consumer yamux sessions. This causes each consumer's
 	// yamuxSess.CloseChan() to fire, triggering a re-registration loop. Each
@@ -233,25 +266,24 @@ func (r *EndpointRegistry) RemoveProvider(endpointName, sessionID string) {
 // has already removed the session from its own SessionStore — this only
 // cleans up the derived registry view.
 func (r *EndpointRegistry) Forget(sessionID, role, endpoint string) {
-	r.mu.RLock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	ep, ok := r.endpoints[endpoint]
-	r.mu.RUnlock()
 	if !ok {
 		return
 	}
 
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
 	if role == "provider" {
-		ep.mu.Lock()
 		if ep.ProviderSession != nil && ep.ProviderSession.ID == sessionID {
 			ep.ProviderSession = nil
 			ep.ProviderYamux = nil
 		}
-		ep.mu.Unlock()
 	} else if role == "consumer" {
-		ep.mu.Lock()
 		delete(ep.ConsumerSessions, sessionID)
-		ep.mu.Unlock()
 	}
+	r.deleteIfEmptyLocked(endpoint, ep)
 }
 
 // AddConsumer registers a consumer session. It returns an error when the
@@ -261,7 +293,9 @@ func (r *EndpointRegistry) AddConsumer(
 	endpointName string,
 	session *brokerSession,
 ) error {
-	ep, err := r.GetOrCreate(endpointName)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ep, err := r.getOrCreateLocked(endpointName)
 	if err != nil {
 		return err
 	}
@@ -292,15 +326,16 @@ func (r *EndpointRegistry) RegisterConsumerYamux(
 
 // UnregisterConsumerYamux removes a consumer's yamux session from the endpoint.
 func (r *EndpointRegistry) UnregisterConsumerYamux(endpointName, sessionID string) {
-	r.mu.RLock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	ep, ok := r.endpoints[endpointName]
-	r.mu.RUnlock()
 	if !ok {
 		return
 	}
 
 	ep.mu.Lock()
 	delete(ep.consumerYamuxSessions, sessionID)
+	r.deleteIfEmptyLocked(endpointName, ep)
 	ep.mu.Unlock()
 }
 

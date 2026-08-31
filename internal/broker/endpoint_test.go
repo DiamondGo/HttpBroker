@@ -111,6 +111,48 @@ func TestAddConsumerFailsAtEndpointLimit(t *testing.T) {
 	}
 }
 
+// TestEndpointCapacityIsReclaimed verifies maxEndpoints limits concurrent
+// topology, not every endpoint name seen over the process lifetime.
+func TestEndpointCapacityIsReclaimed(t *testing.T) {
+	r := NewEndpointRegistry()
+
+	for i := 0; i < maxEndpoints; i++ {
+		name := endpointNameFor(i)
+		session := testSession("consumer-" + name)
+		if err := r.AddConsumer(name, session); err != nil {
+			t.Fatalf("AddConsumer #%d: %v", i, err)
+		}
+		r.Forget(session.ID, "consumer", name)
+	}
+
+	if _, err := r.GetOrCreate("capacity-reused"); err != nil {
+		t.Fatalf("capacity was not reclaimed after disconnects: %v", err)
+	}
+}
+
+// TestForgetKeepsEndpointWithOtherSessions ensures reclamation does not remove
+// topology still owned by another connected session.
+func TestForgetKeepsEndpointWithOtherSessions(t *testing.T) {
+	r := NewEndpointRegistry()
+	first, second := testSession("first"), testSession("second")
+	if err := r.AddConsumer("shared", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AddConsumer("shared", second); err != nil {
+		t.Fatal(err)
+	}
+
+	r.Forget(first.ID, "consumer", "shared")
+	if _, ok := r.GetEndpoint("shared"); !ok {
+		t.Fatal("endpoint with a live consumer was reclaimed")
+	}
+
+	r.Forget(second.ID, "consumer", "shared")
+	if _, ok := r.GetEndpoint("shared"); ok {
+		t.Fatal("empty endpoint was not reclaimed")
+	}
+}
+
 // endpointNameFor produces distinct endpoint names for the limit tests.
 func endpointNameFor(i int) string {
 	const prefix = "ep-"

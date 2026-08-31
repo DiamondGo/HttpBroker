@@ -8,7 +8,7 @@ require (
 )
 
 require (
-	github.com/DiamondGo/pollmux v0.1.4 // indirect
+	github.com/DiamondGo/pollmux v0.1.6 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect

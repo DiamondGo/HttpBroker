@@ -94,9 +94,9 @@ func (s *ScrubConn) Write(p []byte) (int, error) {
 		}
 	}
 
-	// Already accumulating this request's headers from earlier writes: keep
-	// appending. Re-running the boundary heuristic here would be wrong — the
-	// next byte of "GET " (e.g. "E") is not itself a method prefix.
+	// Already accumulating this request's headers from earlier writes: append
+	// and validate the complete accumulated prefix. absorbHeaderBytes switches
+	// to pass-through immediately if a partial method becomes impossible.
 	if len(s.buf) > 0 {
 		n, err := s.absorbHeaderBytes(p)
 		return accepted + n, err
@@ -122,6 +122,19 @@ func (s *ScrubConn) Write(p []byte) (int, error) {
 // is held in the buffer, which is the contract io.Copy relies on.
 func (s *ScrubConn) absorbHeaderBytes(p []byte) (int, error) {
 	s.buf = append(s.buf, p...)
+
+	if !looksLikeHTTPRequest(s.buf) {
+		// The first write looked like a partial method (for example "G"), but
+		// the accumulated bytes no longer match any supported method. Flush
+		// immediately instead of holding an arbitrary binary protocol until it
+		// reaches maxHeaderBytes or happens to contain a header terminator.
+		if _, err := s.writeAll(s.buf); err != nil {
+			return 0, err
+		}
+		s.buf = s.buf[:0]
+		s.passThrough = true
+		return len(p), nil
+	}
 
 	headerEnd := bytes.Index(s.buf, []byte("\r\n\r\n"))
 	if headerEnd < 0 {
@@ -248,10 +261,9 @@ func bodyPlan(header []byte) (skip int, mode int) {
 
 // looksLikeHTTPRequest reports whether p could start an HTTP request: either
 // p begins with a complete method token ("GET ") or p itself is a prefix of
-// one (the first write of a connection can carry just "G" or "GET"). In the
-// second case the caller buffers p and waits for the rest; if the next bytes
-// complete a method the request is scrubbed, if not the maxHeaderBytes guard
-// flushes the buffer and switches the connection to pass-through.
+// one (the first write of a connection can carry just "G" or "GET"). The
+// caller applies it to the complete accumulated prefix, so a later mismatch
+// switches the connection to pass-through immediately.
 func looksLikeHTTPRequest(p []byte) bool {
 	for _, method := range httpMethods {
 		if len(p) < len(method) {
