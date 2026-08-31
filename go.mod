@@ -3,7 +3,7 @@ module github.com/DiamondGo/HttpBroker
 go 1.25.0
 
 require (
-	github.com/DiamondGo/pollmux v0.1.4
+	github.com/DiamondGo/pollmux v0.1.6
 	github.com/gorilla/mux v1.8.1
 	github.com/hashicorp/yamux v0.1.2
 	github.com/mitchellh/mapstructure v1.5.0

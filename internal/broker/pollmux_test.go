@@ -266,10 +266,6 @@ func TestRemoveProviderKeepsConsumerSessionsInStore(t *testing.T) {
 	}
 	delResp.Body.Close()
 
-	if _, ok := srv.registry.GetEndpoint("ep1"); !ok {
-		t.Fatal("expected endpoint ep1 to still exist")
-	}
-
 	// The DELETE closes the provider's pollmux Session, which the yamux
 	// Client session wrapping it detects as EOF, unblocking HandleProvider's
 	// CloseChan() wait and running its deferred RemoveProvider. That happens

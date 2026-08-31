@@ -60,7 +60,11 @@ Consumer 和 Provider 都维护对 Broker 的持续 HTTP POST 请求循环：
 3. Broker 保持响应打开（长轮询），直到有数据可用或超时（30秒）
 4. 客户端在收到响应后立即发送下一个 POST
 
-对任何网络观察者来说，这看起来像一个 Web 应用程序发出常规 API 调用 — 没有 WebSocket，没有持久连接，没有特殊协议。
+对任何网络观察者来说，这看起来像一个 Web 应用程序发出常规 API 调用 — 没有持久连接，没有特殊协议。
+
+### WebSocket 传输（可选）
+
+在 Broker 上设置 `tunnel.enable_websocket: true`、在 Consumer/Provider 上设置 `transport.prefer_websocket: true` 时，双方会协商改用 WebSocket 连接代替上面的长轮询循环。默认关闭，且只有双方都开启时才生效，因此对未升级的部署完全透明。它解决的是长轮询模式的一个实际缺陷：某些反向代理/CDN（实测为 Cloudflare 标准套餐）会缓冲长生命周期的 chunked 请求体而不是实时转发，导致隧道直接挂起而不只是变慢 — WebSocket 走单条持久连接，这类中间设备通常能实时转发。详见 [pollmux 的 README](https://github.com/DiamondGo/pollmux)。
 
 ### yamux 多路复用
 
@@ -400,7 +404,7 @@ ssh internal-server
 
 ## 配置
 
-每个二进制文件都读取一个 YAML 配置文件并支持 CLI 标志覆盖。CLI 标志优先于配置文件值。
+每个二进制文件都读取一个 YAML 配置文件并支持 CLI 标志覆盖。CLI 标志优先于配置文件值。**配置文件是可选的**：如果文件不存在（例如在别的目录下运行二进制），会使用内置默认值加上你的 CLI 标志；文件存在但解析失败才会报错。
 
 ### Broker（`configs/broker.yaml`）
 
@@ -417,8 +421,15 @@ server:
     url: ""                # 重定向目标 URL（格式选项见下文）
 
 tunnel:
-  poll_timeout: "5s"       # 在返回空响应之前保持轮询请求多长时间
-  session_timeout: "5m"    # 断开空闲时间超过此值的会话
+  poll_timeout: "30s"      # 在返回空响应之前保持轮询请求多长时间
+  session_timeout: "60s"   # 断开空闲时间超过此值的会话（必须 >= 2 倍 poll_timeout）
+  # 高级传输调优（均可选，默认值见注释）：
+  # coalesce_window: "2ms"   # 有数据可发后，长轮询响应最多再等多久凑更多数据
+  # poll_buffer_size: 262144 # 单次长轮询响应最多携带的字节数（256KiB）
+  # max_send_bytes: 1048576  # 单个请求体的上限（1MiB）
+  # high_water_warn: 0       # 会话缓冲达到该字节数时告警一次（0 关闭）
+  # poll_mode: "stream"      # "stream"（默认）或 "batch"（旧的离散请求/响应模式）
+  # enable_websocket: false  # 向请求方提供 WebSocket 传输
 
 auth:
   enabled: false           # 启用 Bearer Token 身份验证
@@ -453,6 +464,13 @@ socks5:
 transport:
   poll_interval: "50ms"             # 轮询请求之间的延迟
   retry_backoff: "5s"               # 出错时重新连接前的等待时间
+  # 高级传输调优（均可选，默认值见注释）：
+  # coalesce_window: "2ms"   # 突发数据首次发送前最多等多久以合并请求
+  # poll_mode: "stream"      # "stream"（默认）或 "batch"；对旧版 Broker 自动回退
+  # poll_grace: "10s"        # 为 Broker 前的代理/CDN 额外留出的响应头等待时间
+  # upload_stream_preference: ""  # "" 自动探测（默认）；"stream" 强制；"batch" 禁用
+  # upload_probe_timeout: "15s"   # 自动探测的最长耗时
+  # prefer_websocket: false  # 请求使用 WebSocket 传输（还需 Broker 端 enable_websocket）
 
 logging:
   level: "info"                     # 日志级别：debug、info、warn、error
@@ -474,6 +492,7 @@ provider:
 transport:
   poll_interval: "50ms"             # 轮询请求之间的延迟
   retry_backoff: "5s"               # 出错时重新连接前的等待时间
+  # 高级传输调优：与 Consumer 的 transport 配置块相同
 
 logging:
   level: "info"                     # 日志级别：debug、info、warn、error
@@ -518,11 +537,12 @@ broker:
   httpbroker-broker [flags]
 
 标志：
-  -c, --config string    配置文件路径（默认 "configs/broker.yaml"）
-      --listen string    覆盖监听地址（例如 :8080）
-      --tls-cert string  TLS 证书文件
-      --tls-key string   TLS 密钥文件
-  -h, --help             httpbroker-broker 的帮助
+  -c, --config string        配置文件路径（默认 "configs/broker.yaml"）
+      --enable-status        启用 GET /status 端点
+      --listen string        覆盖监听地址（例如 :8080）
+      --tls-cert string      TLS 证书文件
+      --tls-key string       TLS 密钥文件
+  -h, --help                 httpbroker-broker 的帮助
 ```
 
 ### httpbroker-consumer
@@ -534,11 +554,12 @@ broker:
   httpbroker-consumer [flags]
 
 标志：
-  -c, --config string         配置文件路径（默认 "configs/consumer.yaml"）
-      --broker-url string     broker URL（例如 http://192.168.1.100:8080）
-      --endpoint string       端点名称
-      --socks5-listen string  SOCKS5 监听地址（例如 :1080）
-  -h, --help                  httpbroker-consumer 的帮助
+  -c, --config string                 配置文件路径（默认 "configs/consumer.yaml"）
+      --broker-url string             broker URL（例如 http://192.168.1.100:8080）
+      --endpoint string               端点名称
+      --insecure-skip-verify          跳过 TLS 证书验证（自签名证书）
+      --socks5-listen string          SOCKS5 监听地址（例如 :1080）
+  -h, --help                          httpbroker-consumer 的帮助
 ```
 
 ### httpbroker-provider
@@ -550,11 +571,12 @@ broker:
   httpbroker-provider [flags]
 
 标志：
-  -c, --config string      配置文件路径（默认 "configs/provider.yaml"）
-      --broker-url string  broker URL
-      --endpoint string    端点名称
-      --scrub-headers      从 HTTP 请求中清除代理请求头（默认 false）
-  -h, --help               httpbroker-provider 的帮助
+  -c, --config string             配置文件路径（默认 "configs/provider.yaml"）
+      --broker-url string         broker URL
+      --endpoint string           端点名称
+      --insecure-skip-verify      跳过 TLS 证书验证（自签名证书）
+      --scrub-headers             从 HTTP 请求中清除代理请求头（默认 false）
+  -h, --help                      httpbroker-provider 的帮助
 ```
 
 ## 架构
@@ -570,11 +592,15 @@ internal/
   broker/       → Broker 服务器、端点注册、中继逻辑
   consumer/     → SOCKS5 服务器、yamux 客户端、隧道拨号器
   provider/     → Provider 客户端、目标拨号器、请求头清理器
-  transport/    → HTTP 长轮询传输、基于管道的会话、httpconn 适配器
   config/       → YAML 配置加载、日志设置
 configs/        → 示例 YAML 配置文件
+test/           → 单元级认证测试（独立 Go 模块）
 plans/          → 架构文档
 ```
+
+HTTP 长轮询传输本身位于外部库
+[pollmux](https://github.com/DiamondGo/pollmux)（迁移说明见
+`MIGRATION_POLLMUX.md`）；上面的包只处理它的 `Conn`/`Session` 抽象及其之上的应用拓扑。
 
 有关详细的技术设计，请参阅 [plans/architecture.md](plans/architecture.md)。
 
@@ -602,6 +628,10 @@ plans/          → 架构文档
 - **DNS 隐私**：DNS 查询在 Provider（机器 C）上解析。这意味着你的本地 DNS 解析器永远看不到你通过隧道访问的域名，但 Provider 的 DNS 解析器可以看到。
 
 - **端点命名**：端点名称有助于组织多个隧道。当身份验证被禁用时，任何知道 Broker URL 和端点名称的人都可以连接。启用身份验证以保护你的 Broker。
+
+- **Provider 可达范围（设计上的 SSRF）**：Provider 会拨号 Consumer 请求的任意 host:port，位于 Provider 自己的网络上。因此任何能到达 Broker（未启用认证时）或持有令牌的人，都可以访问 Provider 能到达的所有主机（包括链路本地服务）。应把令牌视为授予了从 Provider 视角出发的完整网络访问权。
+
+- **未认证 Broker 的加固**：即使未启用认证，broker 也会校验 `role`/`endpoint` 元数据、限制端点名称长度（128 字节）和端点总数（1024），并设置 30 秒的请求头读取超时，防止慢速连接长期占用协程。
 
 ## 树莓派部署
 

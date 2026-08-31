@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -22,85 +23,152 @@ var httpMethods = []string{
 	"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT ",
 }
 
+// maxHeaderBytes bounds how many bytes may be buffered while waiting for a
+// request's headers to complete. Legitimate request headers (even with large
+// cookie blocks) fit well under this; it exists so a misdetected binary
+// stream that merely *starts* with an HTTP method cannot grow the buffer
+// without limit. Once crossed, the connection switches to pass-through.
+const maxHeaderBytes = 64 << 10
+
 // ScrubConn wraps a net.Conn and scrubs proxy headers from HTTP requests.
 // For TLS or non-HTTP traffic, it passes through unchanged.
+//
+// It is a small request-boundary state machine, because a keep-alive
+// connection carries many requests and the scrubber must resynchronize after
+// each one:
+//
+//   - atBoundary: the next bytes start a new request. Bytes are inspected:
+//     a TLS ClientHello or any non-HTTP start switches the connection to
+//     pass-through; otherwise headers are buffered until "\r\n\r\n" arrives,
+//     proxy headers are stripped, and the body is accounted for via
+//     Content-Length (skipped exactly) or, when the length is unknown
+//     (chunked, connection close, malformed), the connection switches to
+//     pass-through so body bytes are never mistaken for headers.
+//   - skipping body: exactly the declared Content-Length bytes are passed
+//     through untouched, then the scrubber is back at a request boundary.
+//   - passThrough: everything goes straight to the underlying conn.
+//
+// This matters because a naive "scrub the first request, then stop" scrubber
+// corrupts POST bodies that happen to contain lines starting with a proxy
+// header name (e.g. "Via: ..." inside an uploaded log dump), and a naive
+// "treat the rest of each write as the next request" scrubber corrupts
+// bodies that merely *start* with an HTTP method.
 type ScrubConn struct {
 	net.Conn
-	scrubDone   bool   // true once we've inspected/modified the first request
-	buf         []byte // buffered bytes for inspection
-	passThrough bool   // true if traffic is TLS/binary — skip scrubbing
+	passThrough bool   // once true, every write goes straight to Conn
+	skipBody    int    // body bytes of the current request still to pass through
+	buf         []byte // buffered bytes of the current request's headers
 }
 
 // NewScrubConn wraps conn with HTTP proxy header scrubbing.
 func NewScrubConn(conn net.Conn) *ScrubConn {
-	return &ScrubConn{
-		Conn: conn,
-	}
+	return &ScrubConn{Conn: conn}
 }
 
-// Write inspects data on first call. If HTTP, scrubs proxy headers.
-// After the first HTTP request headers are processed, passes through directly.
+// Write implements io.Writer with the contract io.Copy relies on: it accepts
+// all of p (returning len(p), nil) unless the underlying conn errors.
 func (s *ScrubConn) Write(p []byte) (int, error) {
-	// Fast path: already decided to pass through or already scrubbed.
-	if s.passThrough || s.scrubDone {
+	if s.passThrough {
 		return s.Conn.Write(p)
 	}
-
-	// First call: inspect the data.
 	if len(p) == 0 {
 		return 0, nil
 	}
 
-	// TLS ClientHello starts with 0x16.
-	if p[0] == 0x16 {
-		s.passThrough = true
-		return s.Conn.Write(p)
+	// Skip exactly the declared body of the previous request, then fall back
+	// to boundary inspection for whatever follows in the same write. Bytes
+	// consumed here must be counted in the return value: io.Copy (and any
+	// short-write retry) treats n < len(p) as unwritten and would otherwise
+	// retransmit the body prefix.
+	accepted := 0
+	if s.skipBody > 0 {
+		n := min(len(p), s.skipBody)
+		if _, err := s.writeAll(p[:n]); err != nil {
+			return n, err
+		}
+		s.skipBody -= n
+		accepted += n
+		p = p[n:]
+		if len(p) == 0 {
+			return accepted, nil
+		}
 	}
 
-	// Check if it starts with an HTTP method.
-	if !isHTTPMethod(p) {
-		s.passThrough = true
-		return s.Conn.Write(p)
+	// Already accumulating this request's headers from earlier writes: append
+	// and validate the complete accumulated prefix. absorbHeaderBytes switches
+	// to pass-through immediately if a partial method becomes impossible.
+	if len(s.buf) > 0 {
+		n, err := s.absorbHeaderBytes(p)
+		return accepted + n, err
 	}
 
-	// It looks like HTTP. Buffer the data and look for end of headers.
+	// At a request boundary: is this the start of another HTTP request?
+	if !looksLikeHTTPRequest(p) {
+		// TLS ClientHello (0x16...), other binary, or a body whose declared
+		// length we could not track. Whatever this is, the rest of the
+		// connection is not scrub-able request headers.
+		s.passThrough = true
+		n, err := s.Conn.Write(p)
+		return accepted + n, err
+	}
+
+	n, err := s.absorbHeaderBytes(p)
+	return accepted + n, err
+}
+
+// absorbHeaderBytes appends p to the header buffer and, once the header
+// block is complete, scrubs and forwards it. On success it returns
+// (len(p), nil): every byte of the call was either written to the target or
+// is held in the buffer, which is the contract io.Copy relies on.
+func (s *ScrubConn) absorbHeaderBytes(p []byte) (int, error) {
 	s.buf = append(s.buf, p...)
 
-	headerEnd := bytes.Index(s.buf, []byte("\r\n\r\n"))
-	if headerEnd < 0 {
-		// Headers not complete yet. For simplicity (best-effort), if headers
-		// span multiple writes we just flush what we have and pass through.
-		s.scrubDone = true
-		n, err := s.Conn.Write(s.buf)
-		s.buf = nil
-		// Return original p length to caller since we accepted all of p.
-		if err != nil {
+	if !looksLikeHTTPRequest(s.buf) {
+		// The first write looked like a partial method (for example "G"), but
+		// the accumulated bytes no longer match any supported method. Flush
+		// immediately instead of holding an arbitrary binary protocol until it
+		// reaches maxHeaderBytes or happens to contain a header terminator.
+		if _, err := s.writeAll(s.buf); err != nil {
 			return 0, err
 		}
-		_ = n
+		s.buf = s.buf[:0]
+		s.passThrough = true
 		return len(p), nil
 	}
 
-	// We have complete headers. Scrub proxy headers and write.
+	headerEnd := bytes.Index(s.buf, []byte("\r\n\r\n"))
+	if headerEnd < 0 {
+		// Headers not complete yet; buffer and wait for the next write.
+		if len(s.buf) > maxHeaderBytes {
+			// Not really HTTP after all (no header end in sight). Flush what
+			// we held and stop scrubbing this connection.
+			if _, err := s.writeAll(s.buf); err != nil {
+				return 0, err
+			}
+			s.buf = s.buf[:0]
+			s.passThrough = true
+			return len(p), nil
+		}
+		return len(p), nil
+	}
+
+	// Complete headers in hand. Scrub and forward them, then account for the
+	// body so the next request can be found (or the connection can pass
+	// through) instead of guessing.
 	headerEnd += 4 // include the "\r\n\r\n"
 	headerSection := s.buf[:headerEnd]
 	remainder := s.buf[headerEnd:]
+	s.buf = s.buf[:0]
 
-	scrubbed := scrubProxyHeaders(headerSection)
-
-	// Reset scrubber state so the next HTTP request on this keep-alive
-	// connection will also be scrubbed.
-	s.scrubDone = false
-	s.buf = nil
-
-	// Write scrubbed headers.
-	if _, err := s.Conn.Write(scrubbed); err != nil {
+	if _, err := s.writeAll(scrubProxyHeaders(headerSection)); err != nil {
 		return 0, err
 	}
 
-	// Write any body data that was buffered after headers.
-	// Process remainder through Write() so subsequent request headers
-	// in the same buffer are also scrubbed.
+	s.setBodyAccounting(headerSection)
+
+	// Any bytes after the headers were part of the same write: run them
+	// through the same state machine so a pipelined next request already
+	// sitting in the buffer is scrubbed too.
 	if len(remainder) > 0 {
 		if _, err := s.Write(remainder); err != nil {
 			return 0, err
@@ -110,10 +178,101 @@ func (s *ScrubConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// isHTTPMethod checks if p starts with a known HTTP method.
-func isHTTPMethod(p []byte) bool {
+// setBodyAccounting decides what follows the just-written headers.
+func (s *ScrubConn) setBodyAccounting(header []byte) {
+	skip, mode := bodyPlan(header)
+	switch mode {
+	case bodyLength:
+		s.skipBody = skip // 0 (Content-Length: 0) just means: still at a boundary
+	case bodyPassThrough:
+		// Chunked / connection-close: the body length is not trackable without
+		// a full chunk decoder, so stop scrubbing this connection rather than
+		// risk eating body bytes as headers.
+		s.passThrough = true
+	}
+	// bodyNone: no body expected (GET/HEAD/...); the next bytes are the start
+	// of the next request, so stay at a boundary.
+}
+
+// writeAll writes all of p to the underlying conn, absorbing the (rare)
+// short writes net.Conn can report.
+func (s *ScrubConn) writeAll(p []byte) (int, error) {
+	total := 0
+	for total < len(p) {
+		n, err := s.Conn.Write(p[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+// Body plan modes for what follows a request's headers.
+const (
+	bodyNone        = iota // no body expected; next bytes start the next request
+	bodyLength             // exactly skip body bytes follow
+	bodyPassThrough        // a body exists but its length is not trackable
+)
+
+// bodyPlan inspects the request headers and decides how to account for the
+// body that follows them (see bodyLength's callers for why guessing is bad).
+func bodyPlan(header []byte) (skip int, mode int) {
+	var contentLength int = -1
+	var chunked, connClose bool
+
+	rest := header
+	for len(rest) > 0 {
+		idx := bytes.IndexByte(rest, '\n')
+		if idx < 0 {
+			break
+		}
+		line := bytes.TrimRight(rest[:idx], "\r")
+		rest = rest[idx+1:]
+
+		ci := bytes.IndexByte(line, ':')
+		if ci <= 0 {
+			continue // request line or malformed
+		}
+		name := line[:ci]
+		value := bytes.TrimSpace(line[ci+1:])
+
+		switch {
+		case bytes.EqualFold(name, []byte("content-length")):
+			if n, err := strconv.Atoi(string(value)); err == nil && n >= 0 {
+				contentLength = n
+			}
+		case bytes.EqualFold(name, []byte("transfer-encoding")):
+			chunked = true
+		case bytes.EqualFold(name, []byte("connection")):
+			connClose = strings.Contains(strings.ToLower(string(value)), "close")
+		}
+	}
+
+	switch {
+	case connClose || chunked:
+		return 0, bodyPassThrough
+	case contentLength >= 0:
+		return contentLength, bodyLength
+	default:
+		return 0, bodyNone
+	}
+}
+
+// looksLikeHTTPRequest reports whether p could start an HTTP request: either
+// p begins with a complete method token ("GET ") or p itself is a prefix of
+// one (the first write of a connection can carry just "G" or "GET"). The
+// caller applies it to the complete accumulated prefix, so a later mismatch
+// switches the connection to pass-through immediately.
+func looksLikeHTTPRequest(p []byte) bool {
 	for _, method := range httpMethods {
-		if len(p) >= len(method) && string(p[:len(method)]) == method {
+		if len(p) < len(method) {
+			if bytes.Equal(p, []byte(method)[:len(p)]) {
+				return true
+			}
+			continue
+		}
+		if bytes.HasPrefix(p, []byte(method)) {
 			return true
 		}
 	}

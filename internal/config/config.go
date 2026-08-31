@@ -1,6 +1,9 @@
 package config
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/mitchellh/mapstructure"
@@ -174,68 +177,71 @@ type ProviderOptions struct {
 	DialTimeout  time.Duration `mapstructure:"dial_timeout"`
 }
 
-// LoadBrokerConfig loads broker config from a YAML file using viper.
-func LoadBrokerConfig(path string) (*BrokerConfig, error) {
+// decodeHook converts YAML strings into time.Duration / []string fields.
+func decodeHook() viper.DecoderConfigOption {
+	return viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
+		mapstructure.StringToTimeDurationHookFunc(),
+		mapstructure.StringToSliceHookFunc(","),
+	))
+}
+
+// loadFromPath unmarshals the YAML file at path into dst (a pointer to a
+// config struct). A missing file is NOT an error: every binary's CLI flags
+// and built-in defaults are sufficient on their own, so running from a
+// directory without a config file (e.g. an install dir or systemd unit with
+// WorkingDirectory elsewhere) must keep working. A file that exists but fails
+// to parse is still a hard error — that is almost certainly a typo the
+// operator should see.
+func loadFromPath(path string, dst any) error {
 	v := viper.New()
 	v.SetConfigFile(path)
+
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return nil // no config file: rely on CLI flags and defaults
+	}
+
 	if err := v.ReadInConfig(); err != nil {
+		return err
+	}
+	return v.Unmarshal(dst, decodeHook())
+}
+
+// LoadBrokerConfig loads broker config from a YAML file using viper.
+func LoadBrokerConfig(path string) (*BrokerConfig, error) {
+	cfg := &BrokerConfig{}
+	if err := loadFromPath(path, cfg); err != nil {
 		return nil, err
 	}
-	var cfg BrokerConfig
-	if err := v.Unmarshal(&cfg, viper.DecodeHook(
-		mapstructure.ComposeDecodeHookFunc(
-			mapstructure.StringToTimeDurationHookFunc(),
-			mapstructure.StringToSliceHookFunc(","),
-		),
-	)); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return cfg, nil
 }
 
 // LoadConsumerConfig loads consumer config from a YAML file using viper.
 func LoadConsumerConfig(path string) (*ConsumerConfig, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	if err := v.ReadInConfig(); err != nil {
+	cfg := &ConsumerConfig{}
+	if err := loadFromPath(path, cfg); err != nil {
 		return nil, err
 	}
-	var cfg ConsumerConfig
-	if err := v.Unmarshal(&cfg, viper.DecodeHook(
-		mapstructure.ComposeDecodeHookFunc(
-			mapstructure.StringToTimeDurationHookFunc(),
-			mapstructure.StringToSliceHookFunc(","),
-		),
-	)); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return cfg, nil
 }
 
 // LoadProviderConfig loads provider config from a YAML file using viper.
 func LoadProviderConfig(path string) (*ProviderConfig, error) {
-	v := viper.New()
-	v.SetConfigFile(path)
-	if err := v.ReadInConfig(); err != nil {
+	cfg := &ProviderConfig{}
+	if err := loadFromPath(path, cfg); err != nil {
 		return nil, err
 	}
-	var cfg ProviderConfig
-	if err := v.Unmarshal(&cfg, viper.DecodeHook(
-		mapstructure.ComposeDecodeHookFunc(
-			mapstructure.StringToTimeDurationHookFunc(),
-			mapstructure.StringToSliceHookFunc(","),
-		),
-	)); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return cfg, nil
 }
 
 // NewLogger creates a zap logger based on the log level string.
+// An empty level defaults to info; any other unrecognized level is an error
+// (a typo like "verboase" should be visible, not silently downgraded).
 func NewLogger(level string) (*zap.Logger, error) {
 	var zapLevel zapcore.Level
-	if err := zapLevel.UnmarshalText([]byte(level)); err != nil {
+	if level == "" {
 		zapLevel = zapcore.InfoLevel
+	} else if err := zapLevel.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("invalid logging.level %q (want debug, info, warn or error): %w", level, err)
 	}
 	cfg := zap.NewProductionConfig()
 	cfg.Level = zap.NewAtomicLevelAt(zapLevel)

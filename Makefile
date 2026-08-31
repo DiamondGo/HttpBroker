@@ -33,9 +33,12 @@ build-linux:
 test:
 	go test ./...
 
-# Run integration tests (must be run from project root)
+# Run integration tests (must be run from project root).
+# Note: integration_test.go lives in the root module; ./test is a separate
+# module containing the in-process auth tests (run via `go test ./...` from
+# the test/ directory or `cd test && go test .`).
 test-integration: build-all
-	go test -v -timeout 5m -run TestIntegration ./test
+	go test -v -timeout 5m -run TestIntegration .
 
 # Run all tests (unit + integration)
 test-all: test test-integration

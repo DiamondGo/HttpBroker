@@ -1,5 +1,12 @@
 # HttpBroker - Architecture Plan
 
+> **Note:** This document is the original design plan. The HTTP transport layer
+> described here (`internal/transport`) was later extracted into the external
+> [pollmux](https://github.com/DiamondGo/pollmux) library — see
+> `MIGRATION_POLLMUX.md` for what changed (JSON connect body, 410 for closed
+> sessions, server-driven limits, stream mode, optional WebSocket transport).
+> Where this document and the code disagree, the code wins.
+
 ## Overview
 
 HttpBroker is a three-node proxy network application written in **Go**. It creates a TCP tunnel that allows a machine (Consumer/B) to access network resources available only to another machine (Provider/C), relayed through a central broker (Server/A).
@@ -28,7 +35,7 @@ All traffic between nodes uses **pure HTTP long-polling** — every interaction 
 | Local proxy on B | `things-go/go-socks5` | Mature SOCKS5 library with custom dialer support |
 | Multiplexing | `hashicorp/yamux` | Stream mux over virtual HTTP connection |
 | Configuration | YAML + CLI flags | Simple, human-readable |
-| Auth | Middleware placeholder | No auth now, extensible for token auth later |
+| Auth | Bearer token middleware | Constant-time token check; optional 302 redirect of unauthorized requests |
 
 ## HTTP Transport Design
 
@@ -99,10 +106,11 @@ To a network observer:
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/tunnel/connect` | Create a new tunnel session; query params: `role`, `endpoint` |
+| POST | `/tunnel/connect` | Create a new tunnel session; JSON body: `protocol_version` + `meta{role, endpoint}` (pollmux protocol v1 — query params are pre-migration) |
 | POST | `/tunnel/{session-id}/poll` | Poll: upload data in body, receive downstream data in response |
 | DELETE | `/tunnel/{session-id}` | Close session |
-| GET | `/status` | Health check and endpoint listing |
+| GET | `/tunnel/{session-id}/ws` | WebSocket transport attach (only for sessions negotiated with it) |
+| GET | `/status` | Health check and endpoint listing (disabled by default) |
 
 ### Virtual Connection Implementation
 
@@ -229,13 +237,6 @@ HttpBroker/
 │   └── provider/            # Machine C - Provider with network access
 │       └── main.go
 ├── internal/
-│   ├── transport/           # HTTP transport layer
-│   │   ├── httpconn.go      # Client-side: virtual conn over HTTP polling
-│   │   ├── httpconn_test.go
-│   │   ├── session.go       # Server-side: session with buffered pipes
-│   │   ├── pipe.go          # Thread-safe buffered pipe with blocking read
-│   │   ├── pipe_test.go
-│   │   └── transport.go     # Transport interface for future HTTP/2
 │   ├── broker/              # Broker server logic
 │   │   ├── server.go        # HTTP/HTTPS server, tunnel API handlers
 │   │   ├── endpoint.go      # Endpoint registry: one provider, N consumers
@@ -262,34 +263,23 @@ HttpBroker/
 
 ## Module Details
 
-### 1. `internal/transport` - HTTP Transport Layer
+### 1. Transport layer — external `pollmux` library
 
-- [`transport.go`](internal/transport/transport.go) — `Transport` interface:
-  ```go
-  type Transport interface {
-      // Client side: connect to broker, return virtual conn
-      Connect(brokerURL, sessionID string) (io.ReadWriteCloser, error)
-  }
-  ```
-  Allows swapping HTTP/1.1 polling for HTTP/2 in the future.
+The HTTP long-poll transport no longer lives in this repository. It was
+extracted into [`github.com/DiamondGo/pollmux`](https://github.com/DiamondGo/pollmux),
+which provides:
 
-- [`httpconn.go`](internal/transport/httpconn.go) — `HTTPConn` client-side virtual connection:
-  - Background poll goroutine: continuously POSTs to `/tunnel/{id}/poll`
-  - Each POST carries buffered write data, receives read data
-  - Implements `io.ReadWriteCloser` for yamux
-  - Handles connection errors, timeouts, and shutdown
+- `Connector` / `Conn` — client-side virtual connection over HTTP long polling
+  (reconnect loop, stream mode, optional WebSocket transport, upload
+  auto-detection). See `MIGRATION_POLLMUX.md` for the full story.
+- `ConnectHandler` / `PollHandler` / `DeleteHandler` / `WebSocketHandler` —
+  server-side endpoints.
+- `Session` — server-side virtual connection with two `BufferedPipe`s.
+- `ReconnectLoop` / `AcceptLoop` — the standard client loops.
 
-- [`session.go`](internal/transport/session.go) — `Session` server-side virtual connection:
-  - Two `BufferedPipe`s for bidirectional data flow
-  - Poll HTTP handler reads from request body, writes to response body
-  - Implements `io.ReadWriteCloser` for broker's yamux session
-  - Tracks last activity for session cleanup
-
-- [`pipe.go`](internal/transport/pipe.go) — `BufferedPipe`:
-  - Thread-safe byte buffer with blocking read
-  - `Write(data)` — appends data, wakes blocked readers
-  - `Read(buf)` — blocks until data available or context cancelled
-  - `ReadTimeout(buf, timeout)` — for long-poll handler (returns what's available after timeout)
+This repository keeps only the application topology: `internal/broker`
+(registry + relay), `internal/consumer` (SOCKS5 + tunnel dialer), and
+`internal/provider` (target dialer + header scrubber).
 
 ### 2. `internal/broker` - Broker Server (Machine A)
 
@@ -425,6 +415,7 @@ logging:
 
 | Package | Purpose |
 |---------|---------|
+| `github.com/DiamondGo/pollmux` | HTTP long-poll transport (sessions, pipes, reconnect, stream/websocket modes) |
 | `github.com/hashicorp/yamux` | Stream multiplexing over virtual HTTP connection |
 | `github.com/things-go/go-socks5` | SOCKS5 server with custom dialer |
 | `github.com/gorilla/mux` | HTTP router for broker API |
@@ -523,11 +514,14 @@ func (r *NoopResolver) Resolve(ctx context.Context, name string) (context.Contex
 - `HTTPConn` write buffer: uses `sync.Mutex`
 - yamux handles its own internal concurrency
 
-## Implementation Order
+## Implementation Order (historical)
 
 1. **`internal/transport/pipe.go`** — BufferedPipe with blocking read and timeout
 2. **`internal/transport/session.go`** — Server-side session with pipes
 3. **`internal/transport/httpconn.go`** — Client-side virtual connection with poll loop
+
+(Steps 1–3 shipped and were later extracted into the pollmux library; the
+remaining steps below still apply to this repository.)
 4. **`internal/transport/transport.go`** — Transport interface
 5. **`internal/broker/server.go`** — HTTP server with tunnel API handlers
 6. **`internal/broker/endpoint.go`** — Endpoint registry

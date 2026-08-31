@@ -113,13 +113,17 @@ broker:
 
 ### Test with curl
 
+The connect request carries role/endpoint as a JSON body (protocol v1):
+
 ```bash
 # Without token (should fail with 401)
-curl -X POST http://localhost:8080/tunnel/connect?role=consumer&endpoint=test
+curl -X POST http://localhost:8080/tunnel/connect \
+  -d '{"protocol_version":1,"meta":{"role":"consumer","endpoint":"test"}}'
 
-# With valid token (should succeed)
-curl -X POST http://localhost:8080/tunnel/connect?role=consumer&endpoint=test \
-  -H "Authorization: Bearer dGhpc19pc19hX3NlY3JldF90b2tlbl9leGFtcGxl"
+# With valid token (should succeed and return a session id)
+curl -X POST http://localhost:8080/tunnel/connect \
+  -H "Authorization: Bearer dGhpc19pc19hX3NlY3JldF90b2tlbl9leGFtcGxl" \
+  -d '{"protocol_version":1,"meta":{"role":"consumer","endpoint":"test"}}'
 ```
 
 ### Expected Error Response
@@ -152,16 +156,6 @@ HTTP status: `401 Unauthorized`
 The broker and clients do not log token values. If you need to debug:
 - Verify token length (base64-encoded 32 bytes ≈ 44 characters)
 - Compare token file checksums: `echo -n "token" | sha256sum`
-
-## Disabling Authentication
-
-To disable authentication (for testing only):
-
-```yaml
-# Broker
-auth:
-  enabled: false
-```
 
 ## Status Endpoint Security
 
@@ -208,6 +202,16 @@ When enabled, `GET /status` returns:
   - Placing it behind a VPN or internal network
 - The endpoint does NOT require authentication by design (for health checks)
 - Monitor access logs for unexpected `/status` requests
+
+## Disabling Authentication
+
+To disable authentication (for testing only):
+
+```yaml
+# Broker
+auth:
+  enabled: false
+```
 
 Remove or leave empty the `auth_token` field in consumer/provider configs:
 

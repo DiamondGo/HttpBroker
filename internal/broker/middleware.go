@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"crypto/subtle"
 	"errors"
 	"net/http"
 	"strings"
@@ -31,8 +32,11 @@ func buildRedirectURL(configuredURL string, r *http.Request) string {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	// Support reverse proxy scenario (X-Forwarded-Proto header)
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+	// Support reverse proxy scenario (X-Forwarded-Proto header). The header is
+	// client-controlled, so only accept the two schemes we actually serve —
+	// anything else would let a caller inject an arbitrary scheme into the
+	// Location header.
+	if proto := strings.ToLower(r.Header.Get("X-Forwarded-Proto")); proto == "http" || proto == "https" {
 		scheme = proto
 	}
 
@@ -82,8 +86,9 @@ func (a *TokenAuthenticator) Authenticate(r *http.Request) error {
 		return errors.New("empty token")
 	}
 
-	// Compare with configured token
-	if token != a.token {
+	// Constant-time compare so the failure path does not leak how many
+	// leading bytes of the presented token are correct (timing oracle).
+	if subtle.ConstantTimeCompare([]byte(token), []byte(a.token)) != 1 {
 		return errors.New("invalid token")
 	}
 
