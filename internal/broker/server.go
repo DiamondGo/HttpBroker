@@ -118,7 +118,9 @@ func (s *Server) startFastReaper(stop <-chan struct{}) {
 }
 
 // sweepBrokenPolls evicts every session whose last broken poll is older than
-// brokenPollGrace and which has no poll in flight (a re-poll already landed).
+// brokenPollGrace and which has no poll in flight. A session that already
+// has a re-poll in flight is considered alive: its brokenPolls entry is
+// dropped so a later sweep cannot evict it after that poll completes.
 func (s *Server) sweepBrokenPolls() {
 	now := time.Now()
 
@@ -139,6 +141,7 @@ func (s *Server) sweepBrokenPolls() {
 			continue
 		}
 		if sess.PollInFlight() > 0 {
+			delete(s.brokenPolls, id)
 			continue // the client re-poll landed; it is alive
 		}
 		delete(s.brokenPolls, id)

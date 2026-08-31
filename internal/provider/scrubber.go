@@ -76,16 +76,21 @@ func (s *ScrubConn) Write(p []byte) (int, error) {
 	}
 
 	// Skip exactly the declared body of the previous request, then fall back
-	// to boundary inspection for whatever follows in the same write.
+	// to boundary inspection for whatever follows in the same write. Bytes
+	// consumed here must be counted in the return value: io.Copy (and any
+	// short-write retry) treats n < len(p) as unwritten and would otherwise
+	// retransmit the body prefix.
+	accepted := 0
 	if s.skipBody > 0 {
 		n := min(len(p), s.skipBody)
 		if _, err := s.writeAll(p[:n]); err != nil {
 			return n, err
 		}
 		s.skipBody -= n
+		accepted += n
 		p = p[n:]
 		if len(p) == 0 {
-			return n, nil
+			return accepted, nil
 		}
 	}
 
@@ -93,7 +98,8 @@ func (s *ScrubConn) Write(p []byte) (int, error) {
 	// appending. Re-running the boundary heuristic here would be wrong — the
 	// next byte of "GET " (e.g. "E") is not itself a method prefix.
 	if len(s.buf) > 0 {
-		return s.absorbHeaderBytes(p)
+		n, err := s.absorbHeaderBytes(p)
+		return accepted + n, err
 	}
 
 	// At a request boundary: is this the start of another HTTP request?
@@ -102,10 +108,12 @@ func (s *ScrubConn) Write(p []byte) (int, error) {
 		// length we could not track. Whatever this is, the rest of the
 		// connection is not scrub-able request headers.
 		s.passThrough = true
-		return s.Conn.Write(p)
+		n, err := s.Conn.Write(p)
+		return accepted + n, err
 	}
 
-	return s.absorbHeaderBytes(p)
+	n, err := s.absorbHeaderBytes(p)
+	return accepted + n, err
 }
 
 // absorbHeaderBytes appends p to the header buffer and, once the header

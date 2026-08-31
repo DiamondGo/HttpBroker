@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -257,6 +258,36 @@ func TestScrubConn_ContentLengthZeroStaysAtBoundary(t *testing.T) {
 	got := string(inner.written())
 	want := "PUT /z HTTP/1.1\r\nHost: e\r\nContent-Length: 0\r\n\r\n" +
 		"GET /after HTTP/1.1\r\nHost: e\r\n\r\n"
+	if got != want {
+		t.Fatalf("scrubbed output:\n%q\nwant:\n%q", got, want)
+	}
+}
+
+// TestScrubConn_WriteCountIncludesSkippedBodyPrefix is the io.Copy contract:
+// a write that finishes a Content-Length body and also contains the next
+// request must return the full input length. Returning only the remainder
+// makes the caller retry the body prefix, duplicating it into the stream.
+func TestScrubConn_WriteCountIncludesSkippedBodyPrefix(t *testing.T) {
+	inner := &fakeConn{}
+	s := NewScrubConn(inner)
+
+	body := "hello"
+	if err := writeAll(s, "POST /a HTTP/1.1\r\nHost: e\r\nContent-Length: 5\r\nVia: a\r\n\r\n"+body[:3]); err != nil {
+		t.Fatalf("write headers+prefix: %v", err)
+	}
+
+	rest := body[3:] + "GET /b HTTP/1.1\r\nHost: e\r\nVia: b\r\n\r\n"
+	n, err := io.Copy(s, strings.NewReader(rest))
+	if err != nil {
+		t.Fatalf("io.Copy of body tail + next request: %v", err)
+	}
+	if n != int64(len(rest)) {
+		t.Fatalf("io.Copy wrote %d bytes, want %d", n, len(rest))
+	}
+
+	got := string(inner.written())
+	want := "POST /a HTTP/1.1\r\nHost: e\r\nContent-Length: 5\r\n\r\n" + body +
+		"GET /b HTTP/1.1\r\nHost: e\r\n\r\n"
 	if got != want {
 		t.Fatalf("scrubbed output:\n%q\nwant:\n%q", got, want)
 	}
