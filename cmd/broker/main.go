@@ -68,7 +68,14 @@ func main() {
 			}
 			// pollmux caps ResumeGrace (a detached resumable session holds its
 			// replay buffer for the whole grace) and panics at wiring time
-			// above the cap; turn that into a readable startup error.
+			// above the cap; turn that into a readable startup error. A
+			// negative value would be silently replaced by pollmux's default,
+			// which hides a config mistake — reject it too. Zero/unset keeps
+			// meaning "use the default".
+			if cfg.Tunnel.ResumeGrace < 0 {
+				return fmt.Errorf("tunnel.resume_grace=%v must not be negative (omit it or set 0 for the default)",
+					cfg.Tunnel.ResumeGrace)
+			}
 			if cfg.Tunnel.ResumeGrace > pollmux.MaxResumeGrace {
 				return fmt.Errorf("tunnel.resume_grace=%v exceeds the maximum of %v",
 					cfg.Tunnel.ResumeGrace, pollmux.MaxResumeGrace)

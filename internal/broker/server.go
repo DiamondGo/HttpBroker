@@ -449,29 +449,32 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	statuses := make([]endpointStatus, 0, len(s.registry.endpoints))
 
 	for name, ep := range s.registry.endpoints {
+		// Sample everything about the endpoint under its lock so one
+		// response is a consistent snapshot: the provider's resume state is
+		// read from the provider that is registered *now*, not from one
+		// that RemoveProvider could have swapped out between reading the
+		// pointer and asking it. Resumable/ResumeDeadline only take the
+		// session's own lock, which is never held while taking a registry
+		// lock, so this respects the existing lock order.
 		ep.mu.RLock()
-		provider := ep.ProviderSession
-		consumerCount, resumableConsumers := len(ep.ConsumerSessions), 0
+		st := endpointStatus{
+			Name:          name,
+			ConsumerCount: len(ep.ConsumerSessions),
+		}
 		for _, c := range ep.ConsumerSessions {
 			if c.Resumable() {
-				resumableConsumers++
+				st.ResumableConsumerCount++
 			}
 		}
-		ep.mu.RUnlock()
-
-		st := endpointStatus{
-			Name:                   name,
-			HasProvider:            provider != nil,
-			ConsumerCount:          consumerCount,
-			ResumableConsumerCount: resumableConsumers,
-		}
-		if provider != nil {
+		if provider := ep.ProviderSession; provider != nil {
+			st.HasProvider = true
 			st.ProviderResumable = provider.Resumable()
 			if deadline, detached := provider.ResumeDeadline(); detached {
 				st.ProviderDetached = true
 				st.ProviderResumeGraceLeft = time.Until(deadline).Truncate(time.Millisecond).String()
 			}
 		}
+		ep.mu.RUnlock()
 		statuses = append(statuses, st)
 	}
 	s.registry.mu.RUnlock()
