@@ -349,6 +349,29 @@ func (r *EndpointRegistry) GetEndpoint(name string) (*Endpoint, bool) {
 }
 
 // GetProviderYamux returns the provider yamux session for an endpoint.
+// ProviderResumeDeadline reports whether the endpoint's provider session is
+// resumable and currently has no transport attached — i.e. it dropped its
+// connection and the broker is holding the session open waiting for its
+// /resume — and, if so, when that grace runs out. A provider in this state
+// stays registered on purpose (see brokenPollGrace in server.go): streams
+// opened towards it stall until it resumes, and fail only if the grace
+// expires and pollmux retires the session.
+func (r *EndpointRegistry) ProviderResumeDeadline(endpointName string) (time.Time, bool) {
+	r.mu.RLock()
+	ep, ok := r.endpoints[endpointName]
+	r.mu.RUnlock()
+	if !ok {
+		return time.Time{}, false
+	}
+	ep.mu.RLock()
+	sess := ep.ProviderSession
+	ep.mu.RUnlock()
+	if sess == nil {
+		return time.Time{}, false
+	}
+	return sess.ResumeDeadline()
+}
+
 func (r *EndpointRegistry) GetProviderYamux(endpointName string) (*yamux.Session, bool) {
 	r.mu.RLock()
 	ep, ok := r.endpoints[endpointName]

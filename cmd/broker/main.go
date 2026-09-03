@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DiamondGo/pollmux"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
@@ -64,6 +65,13 @@ func main() {
 			// ListenAndServeTLS with an obscure cert/key error.
 			if cfg.Server.TLS.Enabled && (cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "") {
 				return fmt.Errorf("TLS is enabled but tls.cert_file/tls.key_file are not both set")
+			}
+			// pollmux caps ResumeGrace (a detached resumable session holds its
+			// replay buffer for the whole grace) and panics at wiring time
+			// above the cap; turn that into a readable startup error.
+			if cfg.Tunnel.ResumeGrace > pollmux.MaxResumeGrace {
+				return fmt.Errorf("tunnel.resume_grace=%v exceeds the maximum of %v",
+					cfg.Tunnel.ResumeGrace, pollmux.MaxResumeGrace)
 			}
 			// PollTimeout/SessionTimeout/PollBufferSize/MaxSendBytes/HighWaterWarn
 			// are left at zero when unset in config — pollmux.ServerConfig falls

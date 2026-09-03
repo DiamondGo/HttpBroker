@@ -253,3 +253,69 @@ func TestSweepBrokenPollsStillEvictsNonResumableWhenResumeEnabled(t *testing.T) 
 		t.Fatal("non-resumable session must still be fast-evicted with EnableResume on")
 	}
 }
+
+// TestStatusReportsDetachedResumableProvider: a resumable provider whose
+// transport is down must show up on /status as registered-but-detached,
+// with its remaining grace — the operator's view of "requests to this
+// endpoint are stalling, waiting for the provider to resume".
+func TestStatusReportsDetachedResumableProvider(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		t.Fatalf("logger: %v", err)
+	}
+	t.Cleanup(func() { _ = logger.Sync() })
+	srv := NewServer(Config{
+		ListenAddr:            "127.0.0.1:0",
+		PollTimeout:           time.Second,
+		SessionTimeout:        5 * time.Minute,
+		EnableResume:          true,
+		ResumeGrace:           time.Minute,
+		StatusEndpointEnabled: true,
+	}, logger)
+	ts := httptest.NewServer(srv.httpSrv.Handler)
+	t.Cleanup(ts.Close)
+
+	// Connected but never attached a transport: detached from creation.
+	connectResumableTestSession(t, ts, "provider", "ep-status-detached")
+	waitFor(t, time.Second, "provider registered", func() bool {
+		_, ok := srv.registry.GetProviderYamux("ep-status-detached")
+		return ok
+	})
+
+	resp, err := http.Get(ts.URL + "/status")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Endpoints []struct {
+			Name                    string `json:"name"`
+			HasProvider             bool   `json:"has_provider"`
+			ProviderResumable       bool   `json:"provider_resumable"`
+			ProviderDetached        bool   `json:"provider_detached"`
+			ProviderResumeGraceLeft string `json:"provider_resume_grace_left"`
+		} `json:"endpoints"`
+		TotalSessions             int `json:"total_sessions"`
+		ResumableSessions         int `json:"resumable_sessions"`
+		DetachedResumableSessions int `json:"detached_resumable_sessions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if len(out.Endpoints) != 1 || out.Endpoints[0].Name != "ep-status-detached" {
+		t.Fatalf("unexpected endpoints: %+v", out.Endpoints)
+	}
+	ep := out.Endpoints[0]
+	if !ep.HasProvider || !ep.ProviderResumable || !ep.ProviderDetached {
+		t.Fatalf("expected registered, resumable, detached provider; got %+v", ep)
+	}
+	left, err := time.ParseDuration(ep.ProviderResumeGraceLeft)
+	if err != nil || left <= 0 || left > time.Minute {
+		t.Fatalf("expected grace left in (0, 1m], got %q (%v)", ep.ProviderResumeGraceLeft, err)
+	}
+	if out.TotalSessions != 1 || out.ResumableSessions != 1 || out.DetachedResumableSessions != 1 {
+		t.Fatalf("expected 1/1/1 total/resumable/detached, got %d/%d/%d",
+			out.TotalSessions, out.ResumableSessions, out.DetachedResumableSessions)
+	}
+
+}

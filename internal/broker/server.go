@@ -425,6 +425,15 @@ type endpointStatus struct {
 	Name          string `json:"name"`
 	HasProvider   bool   `json:"has_provider"`
 	ConsumerCount int    `json:"consumer_count"`
+	// ProviderResumable is whether the provider session negotiated resume.
+	ProviderResumable bool `json:"provider_resumable"`
+	// ProviderDetached is whether that resumable provider currently has no
+	// transport attached: it is registered, but streams opened towards it
+	// stall until it resumes or its grace expires (see Relay.bridgeStream).
+	ProviderDetached bool `json:"provider_detached"`
+	// ProviderResumeGraceLeft is how long the detached provider has left to
+	// resume before the broker retires its session. Empty unless detached.
+	ProviderResumeGraceLeft string `json:"provider_resume_grace_left,omitempty"`
 }
 
 // handleStatus handles GET /status.
@@ -434,22 +443,47 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	for name, ep := range s.registry.endpoints {
 		ep.mu.RLock()
-		hasProvider := ep.ProviderSession != nil
+		provider := ep.ProviderSession
 		consumerCount := len(ep.ConsumerSessions)
 		ep.mu.RUnlock()
 
-		statuses = append(statuses, endpointStatus{
+		st := endpointStatus{
 			Name:          name,
-			HasProvider:   hasProvider,
+			HasProvider:   provider != nil,
 			ConsumerCount: consumerCount,
-		})
+		}
+		if provider != nil {
+			st.ProviderResumable = provider.Resumable()
+			if deadline, detached := provider.ResumeDeadline(); detached {
+				st.ProviderDetached = true
+				st.ProviderResumeGraceLeft = time.Until(deadline).Truncate(time.Millisecond).String()
+			}
+		}
+		statuses = append(statuses, st)
 	}
 	s.registry.mu.RUnlock()
 
+	// Resumable sessions waiting detached are the memory-amplification
+	// surface of resume (each holds its replay buffer for the whole grace),
+	// so count them for whoever is watching.
+	sessions := s.store.All()
+	resumable, detached := 0, 0
+	for _, sess := range sessions {
+		if !sess.Resumable() {
+			continue
+		}
+		resumable++
+		if _, d := sess.ResumeDeadline(); d {
+			detached++
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":        s.version,
-		"endpoints":      statuses,
-		"total_sessions": s.store.Len(),
+		"version":                     s.version,
+		"endpoints":                   statuses,
+		"total_sessions":              len(sessions),
+		"resumable_sessions":          resumable,
+		"detached_resumable_sessions": detached,
 	})
 }
 
