@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/DiamondGo/pollmux"
 	"go.uber.org/zap"
@@ -65,7 +66,8 @@ func (r *Relay) HandleProvider(session *brokerSession) {
 	}()
 
 	// Register the provider with its yamux session.
-	if err := r.registry.SetProvider(session.Endpoint, session, yamuxSess); err != nil {
+	mismatched, err := r.registry.SetProvider(session.Endpoint, session, yamuxSess)
+	if err != nil {
 		r.logger.Error("failed to register provider",
 			zap.String("session_id", session.ID),
 			zap.String("endpoint", session.Endpoint),
@@ -74,6 +76,7 @@ func (r *Relay) HandleProvider(session *brokerSession) {
 		return
 	}
 	registered = true
+	warnIfHalfResumable(r.logger, session, mismatched)
 
 	// Notify any bridgeStream goroutines waiting for a provider to arrive.
 	r.registry.NotifyProviderArrived(session.Endpoint)
@@ -201,6 +204,22 @@ func (r *Relay) bridgeStream(
 	}
 
 	// Step 3: Open a new yamux stream to the provider.
+	//
+	// If the provider negotiated a resumable session and its transport is
+	// currently down, Open still returns at once — the SYN lands in the
+	// session's outbound buffer, which pollmux does not bound — but nothing
+	// moves on the stream until the provider resumes. Should the resume
+	// grace expire first, pollmux retires the session, the yamux session
+	// closes, and this stream errors out like any other provider loss. That
+	// is deliberate (a blip must not fail requests outright), but it means a
+	// new request can wait up to ResumeGrace, so leave a trace of it.
+	if deadline, detached := r.registry.ProviderResumeDeadline(endpointName); detached {
+		r.logger.Info("provider transport is detached; stream will stall until it resumes",
+			zap.String("endpoint", endpointName),
+			zap.String("target", targetAddr),
+			zap.Duration("resume_grace_left", time.Until(deadline)),
+		)
+	}
 	providerStream, err := providerYamux.Open()
 	if err != nil {
 		r.logger.Error("failed to open stream to provider",

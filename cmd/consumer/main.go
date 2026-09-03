@@ -89,6 +89,7 @@ func main() {
 				UploadStreamPreference: cfg.Transport.UploadStreamPreference,
 				UploadProbeTimeout:     cfg.Transport.UploadProbeTimeout,
 				PreferWebSocket:        cfg.Transport.PreferWebSocket,
+				PreferResume:           cfg.Transport.PreferResume,
 			}, logger)
 
 			logger.Info("starting consumer",

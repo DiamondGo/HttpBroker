@@ -18,6 +18,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -633,4 +636,329 @@ func TestIntegration_WebSocketTransport(t *testing.T) {
 
 	client := newSOCKS5Client(t, socks5Port)
 	assertConnectivity(t, client, "WebSocketTransport")
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Resumable-session helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+// logSink tees a subprocess's stdout/stderr to the test's own stdout while
+// keeping a copy the test can grep for negotiation and resume events.
+type logSink struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (l *logSink) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *logSink) count(substr string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return strings.Count(l.buf.String(), substr)
+}
+
+// launchBrokerCapturing is launchBroker with the broker's output also copied
+// into sink.
+func launchBrokerCapturing(t *testing.T, port int, sink *logSink, extraArgs ...string) *component {
+	t.Helper()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	args := append([]string{"--listen", addr, "--enable-status"}, extraArgs...)
+	cmd := exec.Command("./bin/httpbroker-broker", args...)
+	out := io.MultiWriter(os.Stdout, sink)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Logf("[broker] started on %s (pid %d)", addr, cmd.Process.Pid)
+	return &component{name: "broker", cmd: cmd}
+}
+
+// tcpProxy is a transparent TCP forwarder placed between a client and the
+// broker so a test can sever every live connection on that hop at will —
+// the local stand-in for a CDN/reverse proxy cutting a connection at its
+// max connection age. The listener stays up, so the client can reconnect
+// (and, for a resumable session, resume) straight away.
+type tcpProxy struct {
+	ln     net.Listener
+	target string
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
+}
+
+func newTCPProxy(t *testing.T, targetPort int) *tcpProxy {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("proxy listen: %v", err)
+	}
+	p := &tcpProxy{
+		ln:     ln,
+		target: fmt.Sprintf("127.0.0.1:%d", targetPort),
+		conns:  make(map[net.Conn]struct{}),
+	}
+	t.Cleanup(func() { _ = ln.Close(); p.dropAll() })
+	go p.serve()
+	return p
+}
+
+func (p *tcpProxy) port() int { return p.ln.Addr().(*net.TCPAddr).Port }
+
+func (p *tcpProxy) serve() {
+	for {
+		c, err := p.ln.Accept()
+		if err != nil {
+			return
+		}
+		go p.handle(c)
+	}
+}
+
+func (p *tcpProxy) handle(client net.Conn) {
+	upstream, err := net.Dial("tcp", p.target)
+	if err != nil {
+		client.Close()
+		return
+	}
+	p.mu.Lock()
+	p.conns[client] = struct{}{}
+	p.conns[upstream] = struct{}{}
+	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		delete(p.conns, client)
+		delete(p.conns, upstream)
+		p.mu.Unlock()
+		client.Close()
+		upstream.Close()
+	}()
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(upstream, client); done <- struct{}{} }()
+	go func() { io.Copy(client, upstream); done <- struct{}{} }()
+	<-done
+}
+
+// dropAll severs every connection currently flowing through the proxy.
+func (p *tcpProxy) dropAll() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for c := range p.conns {
+		c.Close()
+		n++
+	}
+	return n
+}
+
+// startEchoServer serves a TCP echo on a random loopback port; the provider
+// dials it as the SOCKS5 CONNECT target so the test controls both ends of
+// the tunnelled stream and can check it byte for byte.
+func startEchoServer(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer c.Close(); io.Copy(c, c) }()
+		}
+	}()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// echoRoundTrip writes a message on the tunnelled stream and expects it
+// echoed back within timeout. After a transport drop this is the assertion
+// that the very same yamux stream is still alive.
+func echoRoundTrip(t *testing.T, conn net.Conn, msg string, timeout time.Duration) {
+	t.Helper()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	defer conn.SetDeadline(time.Time{})
+	if _, err := io.WriteString(conn, msg); err != nil {
+		t.Fatalf("write %q: %v", msg, err)
+	}
+	buf := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read echo of %q: %v", msg, err)
+	}
+	if string(buf) != msg {
+		t.Fatalf("echo mismatch: sent %q, got %q", msg, buf)
+	}
+}
+
+// sessionIDForRole pulls the session id the broker logged for the given
+// role out of its "session created" line.
+func sessionIDForRole(t *testing.T, sink *logSink, role string) string {
+	t.Helper()
+	sink.mu.Lock()
+	log := sink.buf.String()
+	sink.mu.Unlock()
+	re := regexp.MustCompile(`"msg":"session created","session_id":"([0-9a-f]+)","role":"` + role + `"`)
+	m := re.FindStringSubmatch(log)
+	if m == nil {
+		t.Fatalf("no session-created line for role %q in broker log", role)
+	}
+	return m[1]
+}
+
+func waitForLogCount(t *testing.T, sink *logSink, substr string, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if sink.count(substr) >= want {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d× %q in broker log (have %d)", want, substr, sink.count(substr))
+}
+
+const (
+	// brokerSessionCreated is HttpBroker's own log line, one per session
+	// the broker admits; pollmux's line for the same event carries the
+	// negotiated flags.
+	brokerSessionCreated   = `"msg":"session created"`
+	pollmuxResumableCreate = `"msg":"pollmux: session created"`
+	resumableTrue          = `"resumable":true`
+)
+
+// resumedLine is the prefix of pollmux's log line for a successful /resume
+// of the given session.
+func resumedLine(sessionID string) string {
+	return `"msg":"pollmux: session resumed","session_id":"` + sessionID + `"`
+}
+
+// runResumableIntegration launches broker/provider/consumer with the given
+// config snippets, with each client hop routed through a tcpProxy, and
+// proves the session actually resumes rather than merely reconnects:
+//
+//  1. the broker's connect log must report resumable:true for both the
+//     consumer and the provider session;
+//  2. a tunnelled TCP stream (SOCKS5 → provider → local echo server) is
+//     opened and exercised;
+//  3. every connection on the consumer hop is severed, then every one on the
+//     provider hop; after each cut the broker must log a successful resume
+//     and the *same* stream must still echo;
+//  4. the broker must never have created more than the original two
+//     sessions — a client falling back to today's reconnect path would
+//     show up as a third.
+//
+// Both transports pollmux can resume are covered by the two tests below.
+func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport string) {
+	t.Helper()
+	buildBinaries(t)
+
+	brokerCfg := writeTempConfig(t, "broker.yaml", "tunnel:\n"+brokerTunnel)
+	consumerCfg := writeTempConfig(t, "consumer.yaml", "transport:\n"+clientTransport)
+	providerCfg := writeTempConfig(t, "provider.yaml", "transport:\n"+clientTransport)
+
+	brokerPort, err := randomHighPort()
+	if err != nil {
+		t.Fatalf("allocate broker port: %v", err)
+	}
+	socks5Port, err := randomHighPort()
+	if err != nil {
+		t.Fatalf("allocate socks5 port: %v", err)
+	}
+
+	sink := &logSink{}
+	broker := launchBrokerCapturing(t, brokerPort, sink, "--config", brokerCfg)
+	defer broker.stop(t)
+	waitForBroker(t, brokerPort, 15*time.Second)
+
+	providerHop := newTCPProxy(t, brokerPort)
+	consumerHop := newTCPProxy(t, brokerPort)
+
+	provider := launchProvider(t, providerHop.port(), "--config", providerCfg)
+	defer provider.stop(t)
+
+	consumer := launchConsumer(t, consumerHop.port(), socks5Port, "--config", consumerCfg)
+	defer consumer.stop(t)
+	waitForSOCKS5(t, socks5Port, 20*time.Second)
+
+	// 1. Both sessions negotiated resume.
+	waitForLogCount(t, sink, brokerSessionCreated, 2, 10*time.Second)
+	if got := sink.count(pollmuxResumableCreate); got != 2 {
+		t.Fatalf("[%s] expected 2 pollmux session-created lines, got %d", label, got)
+	}
+	if got := sink.count(resumableTrue); got != 2 {
+		t.Fatalf("[%s] expected both sessions negotiated resumable:true, broker log shows %d", label, got)
+	}
+
+	// 2. Open a tunnelled stream and prove it works.
+	echoPort := startEchoServer(t)
+	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", socks5Port), nil, proxy.Direct)
+	if err != nil {
+		t.Fatalf("socks5 dialer: %v", err)
+	}
+	var conn net.Conn
+	waitFor := time.Now().Add(15 * time.Second)
+	for {
+		conn, err = dialer.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", echoPort))
+		if err == nil || time.Now().After(waitFor) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("[%s] dial echo through SOCKS5: %v", label, err)
+	}
+	defer conn.Close()
+	echoRoundTrip(t, conn, "before any drop\n", 10*time.Second)
+
+	// 3. Cut each hop in turn; the session on that hop must resume (not
+	//    reconnect) and the stream must survive both cuts.
+	for _, hop := range []struct {
+		name  string
+		proxy *tcpProxy
+	}{{"consumer", consumerHop}, {"provider", providerHop}} {
+		sessionID := sessionIDForRole(t, sink, hop.name)
+		if sink.count(resumedLine(sessionID)) != 0 {
+			t.Fatalf("[%s] %s session resumed before its hop was cut", label, hop.name)
+		}
+		n := hop.proxy.dropAll()
+		t.Logf("[%s] severed %d connection(s) on the %s hop", label, n, hop.name)
+		if n == 0 {
+			t.Fatalf("[%s] no live connections on the %s hop to sever", label, hop.name)
+		}
+		waitForLogCount(t, sink, resumedLine(sessionID), 1, 20*time.Second)
+		echoRoundTrip(t, conn, fmt.Sprintf("after %s drop\n", hop.name), 20*time.Second)
+	}
+
+	// 4. No client fell back to a fresh session.
+	if got := sink.count(brokerSessionCreated); got != 2 {
+		t.Fatalf("[%s] expected exactly 2 sessions for the whole run, broker created %d "+
+			"(a client reconnected with a new session instead of resuming)", label, got)
+	}
+
+	// The ordinary path still works on top of the resumed sessions.
+	assertConnectivity(t, newSOCKS5Client(t, socks5Port), label)
+}
+
+// TestIntegration_ResumableStream: resume negotiated over stream mode in
+// both directions. upload_stream_preference is forced to "stream" so the
+// connect-time probe is skipped — with it on auto, a probe failure would
+// silently fall back to a non-resumable session, which the resumable:true
+// assertion would then catch rather than the test passing by accident.
+func TestIntegration_ResumableStream(t *testing.T) {
+	runResumableIntegration(t, "ResumableStream",
+		"  enable_resume: true\n  resume_grace: \"30s\"\n",
+		"  poll_mode: \"stream\"\n  upload_stream_preference: \"stream\"\n  prefer_resume: true\n")
+}
+
+// TestIntegration_ResumableWebSocket: resume negotiated over the WebSocket
+// transport — the combination local/*.yaml actually deploys.
+func TestIntegration_ResumableWebSocket(t *testing.T) {
+	runResumableIntegration(t, "ResumableWebSocket",
+		"  enable_websocket: true\n  enable_resume: true\n  resume_grace: \"30s\"\n",
+		"  prefer_websocket: true\n  prefer_resume: true\n")
 }

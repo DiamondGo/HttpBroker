@@ -2,6 +2,7 @@ package broker
 
 import (
 	"fmt"
+	"go.uber.org/zap"
 	"sync"
 	"time"
 
@@ -92,29 +93,34 @@ func (r *EndpointRegistry) deleteIfEmptyLocked(name string, ep *Endpoint) {
 
 // SetProvider registers a provider session for an endpoint.
 // Returns error if a provider is already registered.
+//
+// On success it also returns the consumers already on the endpoint whose
+// resumability differs from the provider's (see halfResumablePeersLocked),
+// computed under the same locks as the registration so the answer is about
+// the topology this provider actually joined.
 func (r *EndpointRegistry) SetProvider(
 	endpointName string,
 	session *brokerSession,
 	yamuxSess *yamux.Session,
-) error {
+) ([]*brokerSession, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ep, err := r.getOrCreateLocked(endpointName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
 	if ep.ProviderSession != nil {
-		return fmt.Errorf("endpoint %q already has a provider", endpointName)
+		return nil, fmt.Errorf("endpoint %q already has a provider", endpointName)
 	}
 
 	ep.ProviderSession = session
 	ep.ProviderYamux = yamuxSess
 
-	return nil
+	return halfResumablePeersLocked(ep, session), nil
 }
 
 // NotifyProviderArrived broadcasts on the endpoint's cond so that any goroutines
@@ -289,21 +295,25 @@ func (r *EndpointRegistry) Forget(sessionID, role, endpoint string) {
 // AddConsumer registers a consumer session. It returns an error when the
 // endpoint table is full, so the caller (the connect hook) can reject the
 // session instead of leaking it into a half-registered state.
+//
+// On success it also returns the endpoint's provider if its resumability
+// differs from the consumer's (see halfResumablePeersLocked), computed
+// under the same locks as the registration.
 func (r *EndpointRegistry) AddConsumer(
 	endpointName string,
 	session *brokerSession,
-) error {
+) ([]*brokerSession, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ep, err := r.getOrCreateLocked(endpointName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ep.mu.Lock()
+	defer ep.mu.Unlock()
 	ep.ConsumerSessions[session.ID] = session
-	ep.mu.Unlock()
-	return nil
+	return halfResumablePeersLocked(ep, session), nil
 }
 
 // RegisterConsumerYamux stores the consumer's yamux session so it can be
@@ -349,6 +359,81 @@ func (r *EndpointRegistry) GetEndpoint(name string) (*Endpoint, bool) {
 }
 
 // GetProviderYamux returns the provider yamux session for an endpoint.
+// halfResumablePeersLocked returns the sessions on the other side of ep
+// from joined (the provider for a consumer, every consumer for a provider)
+// whose resumability differs from joined's. ep.mu must be held. A tunnel is
+// only as resilient as its weaker hop: a stream survives a transport drop
+// only if both the consumer's and the provider's session can resume, so any
+// mismatch means the operator's intent (resume on) is silently not being
+// met on one side — prefer_resume left off, an older binary, or a client
+// whose upload-stream probe failed and fell back to a non-resumable session.
+//
+// Called by SetProvider/AddConsumer after the registration succeeded and
+// while its locks are still held, so the peers reported are the ones the
+// joining session actually pairs with — never a rejected duplicate
+// provider, and never a topology that changed between registering and
+// looking.
+func halfResumablePeersLocked(ep *Endpoint, joined *brokerSession) []*brokerSession {
+	want := joined.Resumable()
+	var peers []*brokerSession
+	switch joined.Role {
+	case "consumer":
+		if p := ep.ProviderSession; p != nil && p.Resumable() != want {
+			peers = append(peers, p)
+		}
+	case "provider":
+		for _, c := range ep.ConsumerSessions {
+			if c.Resumable() != want {
+				peers = append(peers, c)
+			}
+		}
+	}
+	return peers
+}
+
+// warnIfHalfResumable logs when a session that just joined an endpoint
+// disagrees with its counterpart(s) on resumability — the silent
+// misconfiguration a resumable deployment is most likely to have. peers is
+// what SetProvider/AddConsumer returned for the registration.
+func warnIfHalfResumable(logger *zap.Logger, joined *brokerSession, peers []*brokerSession) {
+	if len(peers) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(peers))
+	for _, p := range peers {
+		ids = append(ids, p.Role+":"+p.ID)
+	}
+	logger.Warn("tunnel is only half resumable: a transport drop on the non-resumable hop will still kill its streams",
+		zap.String("endpoint", joined.Endpoint),
+		zap.String("joined", joined.Role+":"+joined.ID),
+		zap.Bool("joined_resumable", joined.Resumable()),
+		zap.Strings("mismatched_peers", ids),
+	)
+}
+
+// ProviderResumeDeadline reports whether the endpoint's provider session is
+// resumable and currently has no transport attached — i.e. it dropped its
+// connection and the broker is holding the session open waiting for its
+// /resume — and, if so, when that grace runs out. A provider in this state
+// stays registered on purpose (see brokenPollGrace in server.go): streams
+// opened towards it stall until it resumes, and fail only if the grace
+// expires and pollmux retires the session.
+func (r *EndpointRegistry) ProviderResumeDeadline(endpointName string) (time.Time, bool) {
+	r.mu.RLock()
+	ep, ok := r.endpoints[endpointName]
+	r.mu.RUnlock()
+	if !ok {
+		return time.Time{}, false
+	}
+	ep.mu.RLock()
+	sess := ep.ProviderSession
+	ep.mu.RUnlock()
+	if sess == nil {
+		return time.Time{}, false
+	}
+	return sess.ResumeDeadline()
+}
+
 func (r *EndpointRegistry) GetProviderYamux(endpointName string) (*yamux.Session, bool) {
 	r.mu.RLock()
 	ep, ok := r.endpoints[endpointName]

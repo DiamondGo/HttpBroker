@@ -77,6 +77,26 @@ type TunnelConfig struct {
 	// PollMode would otherwise select — this never breaks a client running
 	// an older pollmux that doesn't know about WebSocket at all.
 	EnableWebSocket bool `mapstructure:"enable_websocket"`
+	// EnableResume lets the broker negotiate pollmux's resumable session for
+	// a client that asks for it (transport.prefer_resume on the
+	// consumer/provider side). A resumable session — and the yamux session
+	// with every SSH/SOCKS stream inside it — survives its underlying
+	// transport breaking: the broker keeps it for up to ResumeGrace after
+	// the transport drops and accepts a POST /tunnel/{id}/resume that
+	// re-attaches it, replaying whatever bytes the seam lost. This is what
+	// lets long-lived streams outlive the ~1h "max connection age" cut that
+	// CDNs/reverse proxies (observed with Cloudflare) apply regardless of
+	// traffic. Off by default: purely additive, negotiation is "client
+	// asks && server supports", and an older client that doesn't know
+	// about it simply never asks. Only WebSocket or stream mode in both
+	// directions can be resumed; a batch negotiation is never resumable.
+	EnableResume bool `mapstructure:"enable_resume"`
+	// ResumeGrace is how long a resumable session is kept after its
+	// transport drops, waiting for the client's /resume. Zero/unset uses
+	// pollmux's default (30s); pollmux caps it at 5m (the broker panics at
+	// startup above that) because a detached session holds its replay
+	// buffer for the whole grace.
+	ResumeGrace time.Duration `mapstructure:"resume_grace"`
 }
 
 // AuthConfig holds authentication settings.
@@ -161,6 +181,21 @@ type TransportConfig struct {
 	// (observed with Cloudflare's standard tiers) apply to stream mode's
 	// upload direction — see pollmux's README ("WebSocket 传输模式").
 	PreferWebSocket bool `mapstructure:"prefer_websocket"`
+	// PreferResume asks the broker to make this session resumable across
+	// transport failures: instead of tearing down the yamux session (and
+	// every stream in it) when the connection to the broker breaks, the
+	// client resumes the same session and the streams carry on. It only
+	// takes effect if the broker also has tunnel.enable_resume set —
+	// negotiation is "client asks && server supports", so leaving this on
+	// is safe against a broker that hasn't enabled it, or an older broker
+	// that doesn't know about it at all (it silently falls back to today's
+	// reconnect-with-a-new-session behaviour). Only honoured for WebSocket
+	// transport or stream mode in both directions; with
+	// upload_stream_preference on auto, a failed probe means the session
+	// falls back to a non-resumable one. Both hops (consumer↔broker and
+	// provider↔broker) must be resumable for a stream to survive either
+	// side's transport breaking.
+	PreferResume bool `mapstructure:"prefer_resume"`
 }
 
 // ProviderConfig holds configuration for the provider (Machine C).

@@ -28,6 +28,8 @@ type Config struct {
 	HighWaterWarn               int           // log once when a session buffers this many bytes; 0 disables
 	PollMode                    string        // "" defaults to stream mode; "batch" forces the older discrete poll mode; any other value panics at startup (see resolvePollMode)
 	EnableWebSocket             bool          // whether to offer pollmux's WebSocket transport when a client asks for it (default: false)
+	EnableResume                bool          // whether to negotiate pollmux's resumable sessions when a client asks for it (default: false)
+	ResumeGrace                 time.Duration // how long a resumable session is kept after its transport drops, waiting for /resume (default: pollmux.DefaultResumeGrace, 30s; max pollmux.MaxResumeGrace, 5m)
 	AuthEnabled                 bool          // whether authentication is enabled
 	AuthToken                   string        // authentication token (used when AuthEnabled is true)
 	StatusEndpointEnabled       bool          // whether to expose GET /status endpoint (default: false)
@@ -58,6 +60,13 @@ type brokerSession struct {
 // expires it after the full session_timeout (default 60s). For a dead
 // provider that is a 60-second tunnel blackout: its registration keeps
 // rejecting the replacement provider the whole time.
+//
+// A resumable session (Config.EnableResume negotiated with a client that
+// asked for it) is exempt from this fast path: its transport dropping is
+// exactly the event resumability exists for, and evicting it after 5s
+// would defeat the ResumeGrace it is supposed to wait out. pollmux's own
+// sweeper is resume-aware and retires such a session once its grace runs
+// out with no /resume, so the reaper just leaves it alone.
 const brokenPollGrace = 5 * time.Second
 
 // fastReaperInterval is how often the fast reaper scans for broken-poll
@@ -86,11 +95,13 @@ type Server struct {
 }
 
 // markBrokenPoll records that session id's poll request just ended with its
-// TCP connection dropped. No-op for unknown or already-closed sessions.
+// TCP connection dropped. No-op for unknown or already-closed sessions, and
+// for resumable ones: their transport dropping is expected and handled by
+// pollmux's resume-aware sweeper (see brokenPollGrace).
 func (s *Server) markBrokenPoll(r *http.Request) {
 	id := s.pcfg.SessionIDFunc(r)
 	sess, ok := s.store.Get(id)
-	if !ok || sess.IsClosed() {
+	if !ok || sess.IsClosed() || sess.Resumable() {
 		return
 	}
 	s.brokenPollsMu.Lock()
@@ -121,6 +132,13 @@ func (s *Server) startFastReaper(stop <-chan struct{}) {
 // brokenPollGrace and which has no poll or persistent transport in flight.
 // pollmux performs the idle check and close atomically, so a re-poll racing
 // this scan either attaches first and survives, or observes the closed session.
+//
+// A resumable session is skipped (and its entry dropped) even if it made it
+// into brokenPolls — markBrokenPoll already filters these out, this is the
+// second line of defence. pollmux's CloseSessionIfNoPollInFlight would also
+// refuse to close a detached resumable session inside its grace, so the skip
+// here is about not competing with pollmux's sweeper (and not logging an
+// eviction that never happens), not about correctness.
 func (s *Server) sweepBrokenPolls() {
 	now := time.Now()
 
@@ -136,7 +154,7 @@ func (s *Server) sweepBrokenPolls() {
 			continue
 		}
 		sess, ok := s.store.Get(id)
-		if !ok || sess.IsClosed() {
+		if !ok || sess.IsClosed() || sess.Resumable() {
 			delete(s.brokenPolls, id)
 			continue
 		}
@@ -197,6 +215,8 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		HighWaterWarn:   config.HighWaterWarn,
 		PollMode:        resolvePollMode(config.PollMode),
 		EnableWebSocket: config.EnableWebSocket,
+		EnableResume:    config.EnableResume,
+		ResumeGrace:     config.ResumeGrace,
 		// This project uses gorilla/mux, not net/http's own router.
 		SessionIDFunc: func(r *http.Request) string { return mux.Vars(r)["id"] },
 		Logger:        slogger,
@@ -249,6 +269,14 @@ func NewServer(config Config, logger *zap.Logger) *Server {
 		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
 			pollmux.WebSocketHandler(store, s.pcfg, s.hooks))).
 		Methods("GET")
+	// /resume must sit behind the very same auth middleware as /poll, /ws
+	// and DELETE: an unauthenticated caller that reaches it could end a
+	// session's resumability (pollmux answers an out-of-range offset with
+	// 409 and marks the session non-resumable for good, by design).
+	router.Handle("/tunnel/{id}/resume",
+		AuthMiddleware(auth, config.UnauthorizedRedirectEnabled, config.UnauthorizedRedirectURL,
+			pollmux.ResumeHandler(store, s.pcfg, s.hooks))).
+		Methods("POST")
 
 	// Conditionally register /status endpoint based on configuration
 	if config.StatusEndpointEnabled {
@@ -313,9 +341,11 @@ func (s *Server) onConnect(sess *pollmux.Session, meta map[string]string) error 
 	if bs.Role == "provider" {
 		go s.relay.HandleProvider(bs)
 	} else {
-		if err := s.registry.AddConsumer(bs.Endpoint, bs); err != nil {
+		mismatched, err := s.registry.AddConsumer(bs.Endpoint, bs)
+		if err != nil {
 			return err
 		}
+		warnIfHalfResumable(s.logger, bs, mismatched)
 		go s.relay.HandleConsumer(bs)
 	}
 
@@ -397,6 +427,20 @@ type endpointStatus struct {
 	Name          string `json:"name"`
 	HasProvider   bool   `json:"has_provider"`
 	ConsumerCount int    `json:"consumer_count"`
+	// ProviderResumable is whether the provider session negotiated resume.
+	ProviderResumable bool `json:"provider_resumable"`
+	// ProviderDetached is whether that resumable provider currently has no
+	// transport attached: it is registered, but streams opened towards it
+	// stall until it resumes or its grace expires (see Relay.bridgeStream).
+	ProviderDetached bool `json:"provider_detached"`
+	// ProviderResumeGraceLeft is how long the detached provider has left to
+	// resume before the broker retires its session. Empty unless detached.
+	ProviderResumeGraceLeft string `json:"provider_resume_grace_left,omitempty"`
+	// ResumableConsumerCount is how many of ConsumerCount negotiated resume.
+	// A stream survives a transport drop only if both its consumer and the
+	// provider are resumable, so anything short of ConsumerCount alongside
+	// ProviderResumable means part of this endpoint is only half covered.
+	ResumableConsumerCount int `json:"resumable_consumer_count"`
 }
 
 // handleStatus handles GET /status.
@@ -405,23 +449,57 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	statuses := make([]endpointStatus, 0, len(s.registry.endpoints))
 
 	for name, ep := range s.registry.endpoints {
+		// Sample everything about the endpoint under its lock so one
+		// response is a consistent snapshot: the provider's resume state is
+		// read from the provider that is registered *now*, not from one
+		// that RemoveProvider could have swapped out between reading the
+		// pointer and asking it. Resumable/ResumeDeadline only take the
+		// session's own lock, which is never held while taking a registry
+		// lock, so this respects the existing lock order.
 		ep.mu.RLock()
-		hasProvider := ep.ProviderSession != nil
-		consumerCount := len(ep.ConsumerSessions)
-		ep.mu.RUnlock()
-
-		statuses = append(statuses, endpointStatus{
+		st := endpointStatus{
 			Name:          name,
-			HasProvider:   hasProvider,
-			ConsumerCount: consumerCount,
-		})
+			ConsumerCount: len(ep.ConsumerSessions),
+		}
+		for _, c := range ep.ConsumerSessions {
+			if c.Resumable() {
+				st.ResumableConsumerCount++
+			}
+		}
+		if provider := ep.ProviderSession; provider != nil {
+			st.HasProvider = true
+			st.ProviderResumable = provider.Resumable()
+			if deadline, detached := provider.ResumeDeadline(); detached {
+				st.ProviderDetached = true
+				st.ProviderResumeGraceLeft = time.Until(deadline).Truncate(time.Millisecond).String()
+			}
+		}
+		ep.mu.RUnlock()
+		statuses = append(statuses, st)
 	}
 	s.registry.mu.RUnlock()
 
+	// Resumable sessions waiting detached are the memory-amplification
+	// surface of resume (each holds its replay buffer for the whole grace),
+	// so count them for whoever is watching.
+	sessions := s.store.All()
+	resumable, detached := 0, 0
+	for _, sess := range sessions {
+		if !sess.Resumable() {
+			continue
+		}
+		resumable++
+		if _, d := sess.ResumeDeadline(); d {
+			detached++
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":        s.version,
-		"endpoints":      statuses,
-		"total_sessions": s.store.Len(),
+		"version":                     s.version,
+		"endpoints":                   statuses,
+		"total_sessions":              len(sessions),
+		"resumable_sessions":          resumable,
+		"detached_resumable_sessions": detached,
 	})
 }
 

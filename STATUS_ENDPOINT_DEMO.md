@@ -58,11 +58,29 @@ After starting provider and consumer:
     {
       "name": "default",
       "has_provider": true,
-      "consumer_count": 1
+      "consumer_count": 1,
+      "provider_resumable": true,
+      "provider_detached": false,
+      "resumable_consumer_count": 1
     }
-  ]
+  ],
+  "total_sessions": 2,
+  "resumable_sessions": 2,
+  "detached_resumable_sessions": 0
 }
 ```
+
+`provider_resumable` / `resumable_sessions` reflect sessions that negotiated
+resume (`tunnel.enable_resume` + `transport.prefer_resume`). A provider whose
+transport dropped but is still inside its resume grace shows
+`provider_detached: true` plus `provider_resume_grace_left`; it stays
+registered on purpose, and new streams towards it wait until it resumes (or
+fail once the grace expires and the broker retires the session).
+`resumable_consumer_count` below `consumer_count` while `provider_resumable`
+is true (or vice versa) means the endpoint is only half resumable: a stream
+survives a transport drop only if both its consumer and the provider can
+resume. The broker also logs a warning whenever a session joins an endpoint
+whose counterpart disagrees with it on resumability.
 
 ---
 
