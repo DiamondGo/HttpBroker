@@ -389,3 +389,37 @@ func TestHalfResumableTunnelIsReported(t *testing.T) {
 		t.Fatalf("expected no further warning for a matching consumer, got %d total", n)
 	}
 }
+
+// TestRejectedDuplicateProviderDoesNotWarnHalfResumable: a second provider
+// for an endpoint is refused by SetProvider. It must not be compared against
+// the consumers first — that would log a half-resumable warning about a
+// provider that never served anyone, while the real pairing is fine.
+func TestRejectedDuplicateProviderDoesNotWarnHalfResumable(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	srv := NewServer(Config{
+		ListenAddr:     "127.0.0.1:0",
+		PollTimeout:    time.Second,
+		SessionTimeout: 5 * time.Minute,
+		EnableResume:   true,
+	}, logger)
+	ts := httptest.NewServer(srv.httpSrv.Handler)
+	t.Cleanup(ts.Close)
+
+	const ep = "ep-duplicate-provider"
+	connectResumableTestSession(t, ts, "provider", ep)
+	waitFor(t, time.Second, "provider registered", func() bool {
+		_, ok := srv.registry.GetProviderYamux(ep)
+		return ok
+	})
+	connectResumableTestSession(t, ts, "consumer", ep)
+
+	// A non-resumable duplicate provider: refused, and must stay silent.
+	connectTestSession(t, ts, "provider", ep)
+	waitFor(t, 2*time.Second, "duplicate provider refused", func() bool {
+		return logs.FilterMessageSnippet("failed to register provider").Len() == 1
+	})
+	if n := logs.FilterMessageSnippet("tunnel is only half resumable").Len(); n != 0 {
+		t.Fatalf("a refused duplicate provider must not trigger the half-resumable warning, got %d", n)
+	}
+}

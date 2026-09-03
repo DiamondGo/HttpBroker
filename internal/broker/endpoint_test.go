@@ -29,7 +29,7 @@ func TestRemoveProviderDoesNotEvictADifferentProvider(t *testing.T) {
 		Endpoint: "ep",
 	}
 
-	if err := r.SetProvider("ep", providerA, nil); err != nil {
+	if _, err := r.SetProvider("ep", providerA, nil); err != nil {
 		t.Fatalf("SetProvider: %v", err)
 	}
 
@@ -56,10 +56,10 @@ func TestRemoveProviderResetsConsumerBookkeeping(t *testing.T) {
 	provider := &brokerSession{Session: &pollmux.Session{ID: "prov-a"}, Role: "provider", Endpoint: "ep"}
 	consumer := testSession("cons-1")
 
-	if err := r.SetProvider("ep", provider, nil); err != nil {
+	if _, err := r.SetProvider("ep", provider, nil); err != nil {
 		t.Fatalf("SetProvider: %v", err)
 	}
-	if err := r.AddConsumer("ep", consumer); err != nil {
+	if _, err := r.AddConsumer("ep", consumer); err != nil {
 		t.Fatalf("AddConsumer: %v", err)
 	}
 
@@ -106,7 +106,7 @@ func TestAddConsumerFailsAtEndpointLimit(t *testing.T) {
 		}
 	}
 
-	if err := r.AddConsumer("one-too-many", testSession("c1")); err == nil {
+	if _, err := r.AddConsumer("one-too-many", testSession("c1")); err == nil {
 		t.Fatal("expected AddConsumer to fail past the endpoint limit")
 	}
 }
@@ -119,7 +119,7 @@ func TestEndpointCapacityIsReclaimed(t *testing.T) {
 	for i := 0; i < maxEndpoints; i++ {
 		name := endpointNameFor(i)
 		session := testSession("consumer-" + name)
-		if err := r.AddConsumer(name, session); err != nil {
+		if _, err := r.AddConsumer(name, session); err != nil {
 			t.Fatalf("AddConsumer #%d: %v", i, err)
 		}
 		r.Forget(session.ID, "consumer", name)
@@ -135,10 +135,10 @@ func TestEndpointCapacityIsReclaimed(t *testing.T) {
 func TestForgetKeepsEndpointWithOtherSessions(t *testing.T) {
 	r := NewEndpointRegistry()
 	first, second := testSession("first"), testSession("second")
-	if err := r.AddConsumer("shared", first); err != nil {
+	if _, err := r.AddConsumer("shared", first); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.AddConsumer("shared", second); err != nil {
+	if _, err := r.AddConsumer("shared", second); err != nil {
 		t.Fatal(err)
 	}
 

@@ -93,29 +93,34 @@ func (r *EndpointRegistry) deleteIfEmptyLocked(name string, ep *Endpoint) {
 
 // SetProvider registers a provider session for an endpoint.
 // Returns error if a provider is already registered.
+//
+// On success it also returns the consumers already on the endpoint whose
+// resumability differs from the provider's (see halfResumablePeersLocked),
+// computed under the same locks as the registration so the answer is about
+// the topology this provider actually joined.
 func (r *EndpointRegistry) SetProvider(
 	endpointName string,
 	session *brokerSession,
 	yamuxSess *yamux.Session,
-) error {
+) ([]*brokerSession, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ep, err := r.getOrCreateLocked(endpointName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
 	if ep.ProviderSession != nil {
-		return fmt.Errorf("endpoint %q already has a provider", endpointName)
+		return nil, fmt.Errorf("endpoint %q already has a provider", endpointName)
 	}
 
 	ep.ProviderSession = session
 	ep.ProviderYamux = yamuxSess
 
-	return nil
+	return halfResumablePeersLocked(ep, session), nil
 }
 
 // NotifyProviderArrived broadcasts on the endpoint's cond so that any goroutines
@@ -290,21 +295,25 @@ func (r *EndpointRegistry) Forget(sessionID, role, endpoint string) {
 // AddConsumer registers a consumer session. It returns an error when the
 // endpoint table is full, so the caller (the connect hook) can reject the
 // session instead of leaking it into a half-registered state.
+//
+// On success it also returns the endpoint's provider if its resumability
+// differs from the consumer's (see halfResumablePeersLocked), computed
+// under the same locks as the registration.
 func (r *EndpointRegistry) AddConsumer(
 	endpointName string,
 	session *brokerSession,
-) error {
+) ([]*brokerSession, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ep, err := r.getOrCreateLocked(endpointName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	ep.mu.Lock()
+	defer ep.mu.Unlock()
 	ep.ConsumerSessions[session.ID] = session
-	ep.mu.Unlock()
-	return nil
+	return halfResumablePeersLocked(ep, session), nil
 }
 
 // RegisterConsumerYamux stores the consumer's yamux session so it can be
@@ -350,24 +359,21 @@ func (r *EndpointRegistry) GetEndpoint(name string) (*Endpoint, bool) {
 }
 
 // GetProviderYamux returns the provider yamux session for an endpoint.
-// halfResumablePeers returns the sessions on the other side of joined's
-// endpoint (the provider for a consumer, every consumer for a provider)
-// whose resumability differs from joined's. A tunnel is only as resilient
-// as its weaker hop: a stream survives a transport drop only if both the
-// consumer's and the provider's session can resume, so any mismatch means
-// the operator's intent (resume on) is silently not being met on one side —
-// prefer_resume left off, an older binary, or a client whose upload-stream
-// probe failed and fell back to a non-resumable session.
-func (r *EndpointRegistry) halfResumablePeers(joined *brokerSession) []*brokerSession {
-	r.mu.RLock()
-	ep, ok := r.endpoints[joined.Endpoint]
-	r.mu.RUnlock()
-	if !ok {
-		return nil
-	}
-	ep.mu.RLock()
-	defer ep.mu.RUnlock()
-
+// halfResumablePeersLocked returns the sessions on the other side of ep
+// from joined (the provider for a consumer, every consumer for a provider)
+// whose resumability differs from joined's. ep.mu must be held. A tunnel is
+// only as resilient as its weaker hop: a stream survives a transport drop
+// only if both the consumer's and the provider's session can resume, so any
+// mismatch means the operator's intent (resume on) is silently not being
+// met on one side — prefer_resume left off, an older binary, or a client
+// whose upload-stream probe failed and fell back to a non-resumable session.
+//
+// Called by SetProvider/AddConsumer after the registration succeeded and
+// while its locks are still held, so the peers reported are the ones the
+// joining session actually pairs with — never a rejected duplicate
+// provider, and never a topology that changed between registering and
+// looking.
+func halfResumablePeersLocked(ep *Endpoint, joined *brokerSession) []*brokerSession {
 	want := joined.Resumable()
 	var peers []*brokerSession
 	switch joined.Role {
@@ -385,11 +391,11 @@ func (r *EndpointRegistry) halfResumablePeers(joined *brokerSession) []*brokerSe
 	return peers
 }
 
-// warnIfHalfResumable logs, once per session that joins an endpoint, when
-// that session and its counterpart(s) disagree on resumability — the
-// silent misconfiguration a resumable deployment is most likely to have.
-func warnIfHalfResumable(logger *zap.Logger, registry *EndpointRegistry, joined *brokerSession) {
-	peers := registry.halfResumablePeers(joined)
+// warnIfHalfResumable logs when a session that just joined an endpoint
+// disagrees with its counterpart(s) on resumability — the silent
+// misconfiguration a resumable deployment is most likely to have. peers is
+// what SetProvider/AddConsumer returned for the registration.
+func warnIfHalfResumable(logger *zap.Logger, joined *brokerSession, peers []*brokerSession) {
 	if len(peers) == 0 {
 		return
 	}

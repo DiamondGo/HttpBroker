@@ -341,10 +341,11 @@ func (s *Server) onConnect(sess *pollmux.Session, meta map[string]string) error 
 	if bs.Role == "provider" {
 		go s.relay.HandleProvider(bs)
 	} else {
-		if err := s.registry.AddConsumer(bs.Endpoint, bs); err != nil {
+		mismatched, err := s.registry.AddConsumer(bs.Endpoint, bs)
+		if err != nil {
 			return err
 		}
-		warnIfHalfResumable(s.logger, s.registry, bs)
+		warnIfHalfResumable(s.logger, bs, mismatched)
 		go s.relay.HandleConsumer(bs)
 	}
 
