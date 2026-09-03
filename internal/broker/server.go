@@ -344,6 +344,7 @@ func (s *Server) onConnect(sess *pollmux.Session, meta map[string]string) error 
 		if err := s.registry.AddConsumer(bs.Endpoint, bs); err != nil {
 			return err
 		}
+		warnIfHalfResumable(s.logger, s.registry, bs)
 		go s.relay.HandleConsumer(bs)
 	}
 
@@ -434,6 +435,11 @@ type endpointStatus struct {
 	// ProviderResumeGraceLeft is how long the detached provider has left to
 	// resume before the broker retires its session. Empty unless detached.
 	ProviderResumeGraceLeft string `json:"provider_resume_grace_left,omitempty"`
+	// ResumableConsumerCount is how many of ConsumerCount negotiated resume.
+	// A stream survives a transport drop only if both its consumer and the
+	// provider are resumable, so anything short of ConsumerCount alongside
+	// ProviderResumable means part of this endpoint is only half covered.
+	ResumableConsumerCount int `json:"resumable_consumer_count"`
 }
 
 // handleStatus handles GET /status.
@@ -444,13 +450,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	for name, ep := range s.registry.endpoints {
 		ep.mu.RLock()
 		provider := ep.ProviderSession
-		consumerCount := len(ep.ConsumerSessions)
+		consumerCount, resumableConsumers := len(ep.ConsumerSessions), 0
+		for _, c := range ep.ConsumerSessions {
+			if c.Resumable() {
+				resumableConsumers++
+			}
+		}
 		ep.mu.RUnlock()
 
 		st := endpointStatus{
-			Name:          name,
-			HasProvider:   provider != nil,
-			ConsumerCount: consumerCount,
+			Name:                   name,
+			HasProvider:            provider != nil,
+			ConsumerCount:          consumerCount,
+			ResumableConsumerCount: resumableConsumers,
 		}
 		if provider != nil {
 			st.ProviderResumable = provider.Resumable()

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func newReaperTestBroker(t *testing.T, pollTimeout time.Duration) (*Server, *httptest.Server) {
@@ -318,4 +319,73 @@ func TestStatusReportsDetachedResumableProvider(t *testing.T) {
 			out.TotalSessions, out.ResumableSessions, out.DetachedResumableSessions)
 	}
 
+}
+
+// TestHalfResumableTunnelIsReported: a resumable provider paired with a
+// consumer that did not negotiate resume (or the other way round) is the
+// configuration that looks fine and still drops streams. The broker must
+// warn about it and /status must make it visible.
+func TestHalfResumableTunnelIsReported(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	logger := zap.New(core)
+	srv := NewServer(Config{
+		ListenAddr:            "127.0.0.1:0",
+		PollTimeout:           time.Second,
+		SessionTimeout:        5 * time.Minute,
+		EnableResume:          true,
+		StatusEndpointEnabled: true,
+	}, logger)
+	ts := httptest.NewServer(srv.httpSrv.Handler)
+	t.Cleanup(ts.Close)
+
+	const ep = "ep-half-resumable"
+	connectResumableTestSession(t, ts, "provider", ep)
+	waitFor(t, time.Second, "provider registered", func() bool {
+		_, ok := srv.registry.GetProviderYamux(ep)
+		return ok
+	})
+	// Consumer joins without prefer_resume: half-resumable from here on.
+	connectTestSession(t, ts, "consumer", ep)
+
+	const want = "tunnel is only half resumable"
+	waitFor(t, time.Second, "half-resumable warning", func() bool {
+		return logs.FilterMessageSnippet(want).Len() == 1
+	})
+	entry := logs.FilterMessageSnippet(want).All()[0]
+	if got := entry.ContextMap()["endpoint"]; got != ep {
+		t.Fatalf("warning endpoint = %v, want %q", got, ep)
+	}
+	if got := entry.ContextMap()["joined_resumable"]; got != false {
+		t.Fatalf("joined_resumable = %v, want false (the consumer is the non-resumable side)", got)
+	}
+
+	resp, err := http.Get(ts.URL + "/status")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Endpoints []struct {
+			ConsumerCount          int  `json:"consumer_count"`
+			ProviderResumable      bool `json:"provider_resumable"`
+			ResumableConsumerCount int  `json:"resumable_consumer_count"`
+		} `json:"endpoints"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if len(out.Endpoints) != 1 {
+		t.Fatalf("expected 1 endpoint, got %d", len(out.Endpoints))
+	}
+	st := out.Endpoints[0]
+	if !st.ProviderResumable || st.ConsumerCount != 1 || st.ResumableConsumerCount != 0 {
+		t.Fatalf("status should show a resumable provider with 1 consumer of which 0 resumable, got %+v", st)
+	}
+
+	// A matching (both resumable) consumer joining must not warn again.
+	connectResumableTestSession(t, ts, "consumer", ep)
+	time.Sleep(200 * time.Millisecond)
+	if n := logs.FilterMessageSnippet(want).Len(); n != 1 {
+		t.Fatalf("expected no further warning for a matching consumer, got %d total", n)
+	}
 }

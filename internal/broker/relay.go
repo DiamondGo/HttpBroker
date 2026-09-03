@@ -66,6 +66,7 @@ func (r *Relay) HandleProvider(session *brokerSession) {
 	}()
 
 	// Register the provider with its yamux session.
+	warnIfHalfResumable(r.logger, r.registry, session)
 	if err := r.registry.SetProvider(session.Endpoint, session, yamuxSess); err != nil {
 		r.logger.Error("failed to register provider",
 			zap.String("session_id", session.ID),

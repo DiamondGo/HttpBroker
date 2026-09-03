@@ -2,6 +2,7 @@ package broker
 
 import (
 	"fmt"
+	"go.uber.org/zap"
 	"sync"
 	"time"
 
@@ -349,6 +350,61 @@ func (r *EndpointRegistry) GetEndpoint(name string) (*Endpoint, bool) {
 }
 
 // GetProviderYamux returns the provider yamux session for an endpoint.
+// halfResumablePeers returns the sessions on the other side of joined's
+// endpoint (the provider for a consumer, every consumer for a provider)
+// whose resumability differs from joined's. A tunnel is only as resilient
+// as its weaker hop: a stream survives a transport drop only if both the
+// consumer's and the provider's session can resume, so any mismatch means
+// the operator's intent (resume on) is silently not being met on one side —
+// prefer_resume left off, an older binary, or a client whose upload-stream
+// probe failed and fell back to a non-resumable session.
+func (r *EndpointRegistry) halfResumablePeers(joined *brokerSession) []*brokerSession {
+	r.mu.RLock()
+	ep, ok := r.endpoints[joined.Endpoint]
+	r.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	ep.mu.RLock()
+	defer ep.mu.RUnlock()
+
+	want := joined.Resumable()
+	var peers []*brokerSession
+	switch joined.Role {
+	case "consumer":
+		if p := ep.ProviderSession; p != nil && p.Resumable() != want {
+			peers = append(peers, p)
+		}
+	case "provider":
+		for _, c := range ep.ConsumerSessions {
+			if c.Resumable() != want {
+				peers = append(peers, c)
+			}
+		}
+	}
+	return peers
+}
+
+// warnIfHalfResumable logs, once per session that joins an endpoint, when
+// that session and its counterpart(s) disagree on resumability — the
+// silent misconfiguration a resumable deployment is most likely to have.
+func warnIfHalfResumable(logger *zap.Logger, registry *EndpointRegistry, joined *brokerSession) {
+	peers := registry.halfResumablePeers(joined)
+	if len(peers) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(peers))
+	for _, p := range peers {
+		ids = append(ids, p.Role+":"+p.ID)
+	}
+	logger.Warn("tunnel is only half resumable: a transport drop on the non-resumable hop will still kill its streams",
+		zap.String("endpoint", joined.Endpoint),
+		zap.String("joined", joined.Role+":"+joined.ID),
+		zap.Bool("joined_resumable", joined.Resumable()),
+		zap.Strings("mismatched_peers", ids),
+	)
+}
+
 // ProviderResumeDeadline reports whether the endpoint's provider session is
 // resumable and currently has no transport attached — i.e. it dropped its
 // connection and the broker is holding the session open waiting for its
