@@ -42,6 +42,14 @@ type Config struct {
 	// Takes effect only if the broker also has EnableWebSocket on; otherwise
 	// negotiation falls back to PollMode as if this were false.
 	PreferWebSocket bool
+	// PreferResume is passed through to pollmux.Connector.PreferResume. When
+	// the broker also has EnableResume on and the negotiated transport
+	// supports it, the Conn returned by Connect resumes the same session
+	// across transport failures instead of surfacing them, so the yamux
+	// session built on it (and every stream inside) carries on and Serve
+	// keeps running. Otherwise it is silently ignored and a transport
+	// failure ends Serve exactly as it does today.
+	PreferResume bool
 }
 
 // Client is the provider client.
@@ -95,6 +103,7 @@ func (c *Client) Run(ctx context.Context) error {
 				UploadStreamPreference: c.config.UploadStreamPreference,
 				UploadProbeTimeout:     c.config.UploadProbeTimeout,
 				PreferWebSocket:        c.config.PreferWebSocket,
+				PreferResume:           c.config.PreferResume,
 				Logger:                 slogger,
 			}
 			return connector.Connect(ctx)

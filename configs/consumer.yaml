@@ -43,6 +43,19 @@ transport:
                             # all). WebSocket avoids the long-lived chunked-body
                             # buffering some CDNs apply to stream mode's upload
                             # direction.
+  # prefer_resume: false     # Ask the broker to make this session resumable: when the
+                            # connection to the broker breaks, resume the same session
+                            # instead of tearing down the yamux session (and every
+                            # SSH/SOCKS stream in it) and reconnecting fresh. Only
+                            # takes effect if the broker also has tunnel.enable_resume
+                            # on; otherwise silently ignored, so it's safe to leave on
+                            # against a broker that hasn't enabled it (or an older one
+                            # that doesn't know about it). Only honoured over
+                            # WebSocket or stream mode in both directions; with
+                            # upload_stream_preference on auto, a failed probe falls
+                            # back to a non-resumable session. Both the consumer and
+                            # the provider must opt in for a stream to survive either
+                            # side's transport breaking.
 
 logging:
   level: "info"

@@ -36,6 +36,25 @@ tunnel:
                             # live. Safe to enable even against older clients: they
                             # just never ask for it and negotiation falls back to
                             # poll_mode.
+  # enable_resume: false     # Let clients that ask for it (transport.prefer_resume on
+                            # the consumer/provider side) negotiate a resumable
+                            # session: when its transport breaks, the broker keeps
+                            # the session for up to resume_grace and accepts a
+                            # POST /tunnel/{id}/resume that re-attaches it, so the
+                            # yamux session and every SSH/SOCKS stream inside it
+                            # survive. This is the fix for long streams dying at the
+                            # ~1h "max connection age" some CDNs/reverse proxies
+                            # (observed with Cloudflare) enforce regardless of
+                            # traffic. Only WebSocket or stream mode in both
+                            # directions can be resumed. Safe against older clients:
+                            # they never ask, nothing changes for them. Both hops
+                            # (consumer and provider) must opt in for a stream to
+                            # survive either side's transport breaking.
+  # resume_grace: "30s"      # How long a resumable session waits for /resume after its
+                            # transport drops before being retired. Default 30s;
+                            # capped at 5m (the broker panics at startup above that),
+                            # since a detached session holds its replay buffer for
+                            # the whole grace.
 
 auth:
   enabled: false

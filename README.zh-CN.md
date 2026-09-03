@@ -66,6 +66,10 @@ Consumer 和 Provider 都维护对 Broker 的持续 HTTP POST 请求循环：
 
 在 Broker 上设置 `tunnel.enable_websocket: true`、在 Consumer/Provider 上设置 `transport.prefer_websocket: true` 时，双方会协商改用 WebSocket 连接代替上面的长轮询循环。默认关闭，且只有双方都开启时才生效，因此对未升级的部署完全透明。它解决的是长轮询模式的一个实际缺陷：某些反向代理/CDN（实测为 Cloudflare 标准套餐）会缓冲长生命周期的 chunked 请求体而不是实时转发，导致隧道直接挂起而不只是变慢 — WebSocket 走单条持久连接，这类中间设备通常能实时转发。详见 [pollmux 的 README](https://github.com/DiamondGo/pollmux)。
 
+### 跨重连会话恢复（可选）
+
+在 Broker 上设置 `tunnel.enable_resume: true`，并在 Consumer **和** Provider 上都设置 `transport.prefer_resume: true`，会话就能在底层 HTTP/WebSocket 传输断开后存活。不开启时，任何一次传输断开——最常见的是 Cloudflare 之类 CDN/反向代理无视流量、按约一小时的「最大连接存活时间」强制掐断——都会让客户端用全新会话重连，yamux 会话连同里面的所有 SSH/SOCKS 流一起被切断。开启后，客户端改为调用 `POST /tunnel/{id}/resume`，双方重放接缝处丢失的字节，流原样继续。Broker 会把脱离传输的会话保留 `tunnel.resume_grace`（默认 30s，上限 5m）等待恢复；平时在 5s 内淘汰「poll 连接掉线」会话的快速回收器对可恢复会话放行。只有 WebSocket 或上下行都是流式的传输才能恢复，协商是「客户端请求 && Broker 支持」，因此对老版本对端开启也安全——只是静默退回今天的行为。两跳都必须可恢复：Consumer 或 Provider 任一侧未开启，那一跳断裂时流照样会死。设计详见 [pollmux 的 README](https://github.com/DiamondGo/pollmux)。
+
 ### yamux 多路复用
 
 多个浏览器连接（标签页、并发请求）通过 [hashicorp/yamux](https://github.com/hashicorp/yamux) 在单个逻辑 HTTP 会话上多路复用。每个浏览器连接成为一个 yamux 流，所有流共享同一个轮询循环。
@@ -430,6 +434,8 @@ tunnel:
   # high_water_warn: 0       # 会话缓冲达到该字节数时告警一次（0 关闭）
   # poll_mode: "stream"      # "stream"（默认）或 "batch"（旧的离散请求/响应模式）
   # enable_websocket: false  # 向请求方提供 WebSocket 传输
+  # enable_resume: false     # 允许请求方在传输断开后恢复同一会话
+  # resume_grace: "30s"      # 脱离传输的可恢复会话等待 /resume 的最长时间（上限 5m）
 
 auth:
   enabled: false           # 启用 Bearer Token 身份验证
@@ -471,6 +477,7 @@ transport:
   # upload_stream_preference: ""  # "" 自动探测（默认）；"stream" 强制；"batch" 禁用
   # upload_probe_timeout: "15s"   # 自动探测的最长耗时
   # prefer_websocket: false  # 请求使用 WebSocket 传输（还需 Broker 端 enable_websocket）
+  # prefer_resume: false     # 传输断开后恢复同一会话（还需 Broker 端 enable_resume）
 
 logging:
   level: "info"                     # 日志级别：debug、info、warn、error

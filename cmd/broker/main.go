@@ -91,6 +91,8 @@ func main() {
 				HighWaterWarn:               cfg.Tunnel.HighWaterWarn,
 				PollMode:                    cfg.Tunnel.PollMode,
 				EnableWebSocket:             cfg.Tunnel.EnableWebSocket,
+				EnableResume:                cfg.Tunnel.EnableResume,
+				ResumeGrace:                 cfg.Tunnel.ResumeGrace,
 				AuthEnabled:                 cfg.Auth.Enabled,
 				AuthToken:                   cfg.Auth.Token,
 				StatusEndpointEnabled:       cfg.Server.StatusEndpointEnabled,

@@ -634,3 +634,65 @@ func TestIntegration_WebSocketTransport(t *testing.T) {
 	client := newSOCKS5Client(t, socks5Port)
 	assertConnectivity(t, client, "WebSocketTransport")
 }
+
+// runResumableIntegration launches broker/provider/consumer with the given
+// config snippets and asserts SOCKS5 traffic flows. Used to cover both
+// transports pollmux can resume: stream mode in both directions, and
+// WebSocket. The resumable data path (sequence-numbered frames, ACKs and a
+// replay buffer on each side) is a different code path from the plain one,
+// so "resume negotiated and traffic still flows" is worth pinning end to
+// end through the real binaries even though the actual transport-drop
+// recovery is exercised by pollmux's own tests.
+func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport string) {
+	t.Helper()
+	buildBinaries(t)
+
+	brokerCfg := writeTempConfig(t, "broker.yaml", "tunnel:\n"+brokerTunnel)
+	consumerCfg := writeTempConfig(t, "consumer.yaml", "transport:\n"+clientTransport)
+	providerCfg := writeTempConfig(t, "provider.yaml", "transport:\n"+clientTransport)
+
+	brokerPort, err := randomHighPort()
+	if err != nil {
+		t.Fatalf("allocate broker port: %v", err)
+	}
+	socks5Port, err := randomHighPort()
+	if err != nil {
+		t.Fatalf("allocate socks5 port: %v", err)
+	}
+
+	broker := launchBroker(t, brokerPort, "--config", brokerCfg)
+	defer broker.stop(t)
+	waitForBroker(t, brokerPort, 15*time.Second)
+
+	provider := launchProvider(t, brokerPort, "--config", providerCfg)
+	defer provider.stop(t)
+
+	consumer := launchConsumer(t, brokerPort, socks5Port, "--config", consumerCfg)
+	defer consumer.stop(t)
+	waitForSOCKS5(t, socks5Port, 20*time.Second)
+
+	// Give provider a moment to register with the broker.
+	time.Sleep(1 * time.Second)
+
+	client := newSOCKS5Client(t, socks5Port)
+	assertConnectivity(t, client, label)
+}
+
+// TestIntegration_ResumableStream: resume negotiated over stream mode in
+// both directions. upload_stream_preference is forced to "stream" so the
+// connect-time probe is skipped — with it on auto, a probe failure would
+// silently fall back to a non-resumable session and this test would pass
+// without covering the resumable path.
+func TestIntegration_ResumableStream(t *testing.T) {
+	runResumableIntegration(t, "ResumableStream",
+		"  enable_resume: true\n  resume_grace: \"30s\"\n",
+		"  poll_mode: \"stream\"\n  upload_stream_preference: \"stream\"\n  prefer_resume: true\n")
+}
+
+// TestIntegration_ResumableWebSocket: resume negotiated over the WebSocket
+// transport — the combination local/*.yaml actually deploys.
+func TestIntegration_ResumableWebSocket(t *testing.T) {
+	runResumableIntegration(t, "ResumableWebSocket",
+		"  enable_websocket: true\n  enable_resume: true\n  resume_grace: \"30s\"\n",
+		"  prefer_websocket: true\n  prefer_resume: true\n")
+}

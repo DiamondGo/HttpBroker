@@ -66,6 +66,10 @@ To any network observer, this looks like a web application making regular API ca
 
 Set `tunnel.enable_websocket: true` on the Broker and `transport.prefer_websocket: true` on the Consumer/Provider to negotiate a WebSocket connection instead of the long-polling loop above. It's off by default and only takes effect when both sides opt in, so it trades the long-polling loop's "looks like ordinary API traffic" property for reliability against reverse proxies/CDNs that buffer a long-lived chunked request body instead of forwarding it live (observed with Cloudflare's standard tiers) — that buffering can hang the tunnel outright rather than just slow it down. See [pollmux's README](https://github.com/DiamondGo/pollmux#五websocket-传输模式) for the underlying transport's design.
 
+### Resumable Sessions (optional)
+
+Set `tunnel.enable_resume: true` on the Broker and `transport.prefer_resume: true` on **both** the Consumer and the Provider to let a session survive its underlying HTTP/WebSocket transport breaking. Without it, any transport drop — most commonly the ~1h "max connection age" that CDNs/reverse proxies such as Cloudflare enforce regardless of traffic — makes the client reconnect with a brand-new session, which tears down the yamux session and every SSH/SOCKS stream inside it. With it, the client instead calls `POST /tunnel/{id}/resume`, both sides replay whatever bytes the seam lost, and the streams carry on unaware. The Broker keeps a detached session for `tunnel.resume_grace` (default 30s, max 5m) waiting for that resume; the 5s fast reaper that normally evicts a session whose poll connection dropped leaves resumable sessions alone. Only WebSocket transport or stream mode in both directions can be resumed, and negotiation is "client asks && broker supports", so it's safe to turn on against an older peer — it just silently falls back to today's behaviour. Both hops must be resumable: if either the Consumer or the Provider isn't, that hop breaking still kills the stream. See [pollmux's README](https://github.com/DiamondGo/pollmux#六跨重连会话恢复preferresume--enableresume) for the design.
+
 ### yamux Multiplexing
 
 Multiple browser connections (tabs, concurrent requests) are multiplexed over a single logical HTTP session using [hashicorp/yamux](https://github.com/hashicorp/yamux). Each browser connection becomes a yamux stream, all sharing the same poll loop.
@@ -430,6 +434,8 @@ tunnel:
   # high_water_warn: 0       # Log once when a session buffers this many bytes (0 = off)
   # poll_mode: "stream"      # "stream" (default) or "batch" (older discrete request/response)
   # enable_websocket: false  # Offer the WebSocket transport to clients that ask for it
+  # enable_resume: false     # Let clients that ask for it keep their session across transport drops
+  # resume_grace: "30s"      # How long a detached resumable session waits for /resume (max 5m)
 
 auth:
   enabled: false           # Enable Bearer token authentication
@@ -471,6 +477,7 @@ transport:
   # upload_stream_preference: ""  # "" auto-detects (default); "stream" forces; "batch" disables
   # upload_probe_timeout: "15s"   # Bounds the auto-detect probe
   # prefer_websocket: false  # Ask for the WebSocket transport (needs broker enable_websocket too)
+  # prefer_resume: false     # Resume the same session across transport drops (needs broker enable_resume too)
 
 logging:
   level: "info"                     # Log level: debug, info, warn, error
