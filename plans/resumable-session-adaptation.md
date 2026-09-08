@@ -6,7 +6,7 @@
 > 到带该能力的版本后,HttpBroker 需要做的适配**。在 pollmux 未发布该能力前,本文不产生任何
 > 代码改动,仅作待办记录。
 
-> **状态（2026-09-02）：已落地，基于 pollmux v0.2.0。** pollmux 最终发布的接口与 §4 的期望一致：
+> **状态（2026-09-08）：已落地，当前基于 pollmux v0.2.2（最初基于 v0.2.0）。** pollmux 最终发布的接口与 §4 的期望一致：
 > `Session.Resumable()` / `Session.ResumeDeadline()`、`ServerConfig.EnableResume/ResumeGrace`、
 > `Connector.PreferResume`，另需挂载 `pollmux.ResumeHandler` 到 `POST /tunnel/{id}/resume`（与
 > `/poll`、`/ws`、`DELETE` 同一鉴权中间件之后）。一点与 §3.3 预期不同：v0.2.0 的
@@ -14,7 +14,8 @@
 > 所以 fast reaper 的放行不再是正确性所必需，但仍按 §3.3 实现（`markBrokenPoll` 与
 > `sweepBrokenPolls` 都跳过 `Resumable()` 会话），避免与 pollmux 的 sweeper 竞争并消除误导性的
 > 淘汰日志。回归测试见 `internal/broker/reaper_test.go`（`*Resumable*`）与 `integration_test.go`
-> （`TestIntegration_ResumableStream` / `TestIntegration_ResumableWebSocket`）。§7 中需要真实
+> （`TestIntegration_ResumableStream` / `TestIntegration_ResumableWebSocket`，后者会先等待传输
+> 完全空闲，再覆盖 v0.2.1 中旧 WebSocket attachment 无法被 `/resume` 踢下线的回归）。§7 中需要真实
 > Cloudflare/SSH 环境的验证项仍待人工执行。
 
 ## 1. 背景（为什么要做这件事）
