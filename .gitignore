@@ -18,9 +18,10 @@ bin/
 # Go workspace file
 go.work
 
-# IDE and editor files
+# IDE, editor, and local coding-agent files
 .vscode/
 .idea/
+.pi/
 *.swp
 *.swo
 *~

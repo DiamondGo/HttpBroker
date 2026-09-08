@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DiamondGo/pollmux"
 	"golang.org/x/net/proxy"
 )
 
@@ -844,7 +845,9 @@ func resumedLine(sessionID string) string {
 //  1. the broker's connect log must report resumable:true for both the
 //     consumer and the provider session;
 //  2. a tunnelled TCP stream (SOCKS5 → provider → local echo server) is
-//     opened and exercised;
+//     opened and exercised; WebSocket regression coverage then leaves it idle
+//     for a full heartbeat so no pending data/ACK can help the old attachment
+//     exit;
 //  3. every connection on the consumer hop is severed, then every one on the
 //     provider hop; after each cut the broker must log a successful resume
 //     and the *same* stream must still echo;
@@ -853,7 +856,7 @@ func resumedLine(sessionID string) string {
 //     show up as a third.
 //
 // Both transports pollmux can resume are covered by the two tests below.
-func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport string) {
+func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport string, idleBeforeDrop bool) {
 	t.Helper()
 	buildBinaries(t)
 
@@ -915,6 +918,17 @@ func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport 
 	defer conn.Close()
 	echoRoundTrip(t, conn, "before any drop\n", 10*time.Second)
 
+	if idleBeforeDrop {
+		// pollmux v0.2.1 could not detach an idle server-side WebSocket writer:
+		// /resume kept receiving 503 until resume_grace expired. Waiting past
+		// the heartbeat flushes pending transport ACKs and parks both writers,
+		// making the consumer-hop cut below cover that exact regression rather
+		// than accidentally relying on queued data to wake the old attachment.
+		idleFor := pollmux.DefaultHeartbeatInterval + time.Second
+		t.Logf("[%s] leaving the WebSocket tunnel idle for %v before cutting it", label, idleFor)
+		time.Sleep(idleFor)
+	}
+
 	// 3. Cut each hop in turn; the session on that hop must resume (not
 	//    reconnect) and the stream must survive both cuts.
 	for _, hop := range []struct {
@@ -952,7 +966,7 @@ func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport 
 func TestIntegration_ResumableStream(t *testing.T) {
 	runResumableIntegration(t, "ResumableStream",
 		"  enable_resume: true\n  resume_grace: \"30s\"\n",
-		"  poll_mode: \"stream\"\n  upload_stream_preference: \"stream\"\n  prefer_resume: true\n")
+		"  poll_mode: \"stream\"\n  upload_stream_preference: \"stream\"\n  prefer_resume: true\n", false)
 }
 
 // TestIntegration_ResumableWebSocket: resume negotiated over the WebSocket
@@ -960,5 +974,5 @@ func TestIntegration_ResumableStream(t *testing.T) {
 func TestIntegration_ResumableWebSocket(t *testing.T) {
 	runResumableIntegration(t, "ResumableWebSocket",
 		"  enable_websocket: true\n  enable_resume: true\n  resume_grace: \"30s\"\n",
-		"  prefer_websocket: true\n  prefer_resume: true\n")
+		"  prefer_websocket: true\n  prefer_resume: true\n", true)
 }
