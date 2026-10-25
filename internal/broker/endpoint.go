@@ -2,9 +2,10 @@ package broker
 
 import (
 	"fmt"
-	"go.uber.org/zap"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/hashicorp/yamux"
 )
@@ -366,7 +367,7 @@ func (r *EndpointRegistry) GetEndpoint(name string) (*Endpoint, bool) {
 // only if both the consumer's and the provider's session can resume, so any
 // mismatch means the operator's intent (resume on) is silently not being
 // met on one side — prefer_resume left off, an older binary, or a client
-// whose upload-stream probe failed and fell back to a non-resumable session.
+// using a batch direction against a peer without batch-resume support.
 //
 // Called by SetProvider/AddConsumer after the registration succeeded and
 // while its locks are still held, so the peers reported are the ones the

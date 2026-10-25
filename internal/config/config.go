@@ -88,8 +88,10 @@ type TunnelConfig struct {
 	// CDNs/reverse proxies (observed with Cloudflare) apply regardless of
 	// traffic. Off by default: purely additive, negotiation is "client
 	// asks && server supports", and an older client that doesn't know
-	// about it simply never asks. Only WebSocket or stream mode in both
-	// directions can be resumed; a batch negotiation is never resumable.
+	// about it simply never asks. WebSocket and all HTTP batch/stream
+	// combinations can resume. Batch directions require both peers to
+	// support pollmux v0.2.3's batch-resume capability; older peers retain
+	// their original WebSocket/two-way-stream resume support.
 	EnableResume bool `mapstructure:"enable_resume"`
 	// ResumeGrace is how long a resumable session is kept after its
 	// transport drops, waiting for the client's /resume. Zero/unset uses
@@ -133,6 +135,8 @@ type Socks5Config struct {
 
 // TransportConfig holds transport timing settings.
 type TransportConfig struct {
+	// PollInterval pauses after an idle batch poll. For a resumable pure-batch
+	// session it must be strictly below the negotiated resume grace.
 	PollInterval time.Duration `mapstructure:"poll_interval"`
 	RetryBackoff time.Duration `mapstructure:"retry_backoff"`
 	// CoalesceWindow bounds how long pollmux.Connector's Write() waits before
@@ -189,12 +193,13 @@ type TransportConfig struct {
 	// negotiation is "client asks && server supports", so leaving this on
 	// is safe against a broker that hasn't enabled it, or an older broker
 	// that doesn't know about it at all (it silently falls back to today's
-	// reconnect-with-a-new-session behaviour). Only honoured for WebSocket
-	// transport or stream mode in both directions; with
-	// upload_stream_preference on auto, a failed probe means the session
-	// falls back to a non-resumable one. Both hops (consumer↔broker and
-	// provider↔broker) must be resumable for a stream to survive either
-	// side's transport breaking.
+	// reconnect-with-a-new-session behaviour). Supports WebSocket and all
+	// HTTP batch/stream combinations when both peers support batch resume.
+	// With upload_stream_preference on auto, a failed probe reconnects with
+	// batch uploads, retaining resume if the broker advertised that capability.
+	// Older brokers may only resume WebSocket or two-way streams. Both hops
+	// (consumer↔broker and provider↔broker) must be resumable for a stream to
+	// survive either side's transport breaking.
 	PreferResume bool `mapstructure:"prefer_resume"`
 }
 

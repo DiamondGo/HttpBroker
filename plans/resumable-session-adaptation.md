@@ -6,7 +6,7 @@
 > 到带该能力的版本后,HttpBroker 需要做的适配**。在 pollmux 未发布该能力前,本文不产生任何
 > 代码改动,仅作待办记录。
 
-> **状态（2026-09-08）：已落地，当前基于 pollmux v0.2.2（最初基于 v0.2.0）。** pollmux 最终发布的接口与 §4 的期望一致：
+> **状态（2026-10-25）：已落地，当前基于 pollmux v0.2.3（最初基于 v0.2.0）。** pollmux 最终发布的接口与 §4 的期望一致：
 > `Session.Resumable()` / `Session.ResumeDeadline()`、`ServerConfig.EnableResume/ResumeGrace`、
 > `Connector.PreferResume`，另需挂载 `pollmux.ResumeHandler` 到 `POST /tunnel/{id}/resume`（与
 > `/poll`、`/ws`、`DELETE` 同一鉴权中间件之后）。一点与 §3.3 预期不同：v0.2.0 的
@@ -17,6 +17,13 @@
 > （`TestIntegration_ResumableStream` / `TestIntegration_ResumableWebSocket`，后者会先等待传输
 > 完全空闲，再覆盖 v0.2.1 中旧 WebSocket attachment 无法被 `/resume` 踢下线的回归）。§7 中需要真实
 > Cloudflare/SSH 环境的验证项仍待人工执行。
+
+> **v0.2.3 补充：** WebSocket 之外，纯 batch 和两种 batch／stream 混合传输现均可恢复；
+> batch 能力由两端自动协商，老版本对端保留原有行为。自动上传探测失败后可回退到 batch 上传，
+> 在 Broker 支持新能力时继续保留恢复能力。HttpBroker 的中继和 fast reaper 无需改动。
+> `TestIntegration_ResumableHTTPBatchDirections` 覆盖三种新增组合，逐一切断两跳并验证原流和会话存活。
+> 纯 batch 的 `poll_interval` 必须小于 `resume_grace`；正常轮询间隙也可能被 `/status` 显示为 detached，
+> 不能单凭一次 detached 快照判断断线。以下章节保留原始适配设计。
 
 ## 1. 背景（为什么要做这件事）
 

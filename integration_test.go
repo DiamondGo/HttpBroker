@@ -855,7 +855,7 @@ func resumedLine(sessionID string) string {
 //     sessions — a client falling back to today's reconnect path would
 //     show up as a third.
 //
-// Both transports pollmux can resume are covered by the two tests below.
+// WebSocket and every HTTP batch/stream combination are covered below.
 func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport string, idleBeforeDrop bool) {
 	t.Helper()
 	buildBinaries(t)
@@ -960,9 +960,9 @@ func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport 
 
 // TestIntegration_ResumableStream: resume negotiated over stream mode in
 // both directions. upload_stream_preference is forced to "stream" so the
-// connect-time probe is skipped — with it on auto, a probe failure would
-// silently fall back to a non-resumable session, which the resumable:true
-// assertion would then catch rather than the test passing by accident.
+// connect-time probe is skipped — with it on auto, pollmux v0.2.3 could
+// fall back to resumable batch uploads, passing the resume assertions
+// without exercising the intended two-way-stream transport.
 func TestIntegration_ResumableStream(t *testing.T) {
 	runResumableIntegration(t, "ResumableStream",
 		"  enable_resume: true\n  resume_grace: \"30s\"\n",
@@ -975,4 +975,28 @@ func TestIntegration_ResumableWebSocket(t *testing.T) {
 	runResumableIntegration(t, "ResumableWebSocket",
 		"  enable_websocket: true\n  enable_resume: true\n  resume_grace: \"30s\"\n",
 		"  prefer_websocket: true\n  prefer_resume: true\n", true)
+}
+
+// TestIntegration_ResumableHTTPBatchDirections covers pollmux v0.2.3's
+// numbered batch protocol through real broker/provider/consumer binaries.
+// Each case must keep the same SOCKS stream and the original two sessions
+// alive after transport loss on both hops, not just reconnect successfully.
+func TestIntegration_ResumableHTTPBatchDirections(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		brokerPollMode   string
+		clientPollMode   string
+		uploadPreference string
+	}{
+		{"Batch", "batch", "batch", "batch"},
+		{"StreamDownloadBatchUpload", "stream", "stream", "batch"},
+		{"BatchDownloadStreamUpload", "stream", "batch", "stream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runResumableIntegration(t, "Resumable"+tc.name,
+				fmt.Sprintf("  poll_mode: %q\n  enable_resume: true\n  resume_grace: \"30s\"\n", tc.brokerPollMode),
+				fmt.Sprintf("  poll_mode: %q\n  upload_stream_preference: %q\n  prefer_resume: true\n",
+					tc.clientPollMode, tc.uploadPreference), false)
+		})
+	}
 }

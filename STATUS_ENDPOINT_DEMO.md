@@ -82,6 +82,13 @@ survives a transport drop only if both its consumer and the provider can
 resume. The broker also logs a warning whenever a session joins an endpoint
 whose counterpart disagrees with it on resumability.
 
+For resumable pure-batch HTTP, a healthy session can briefly have no request
+attached between polls. Those normal gaps can also appear as
+`provider_detached: true` and contribute to `detached_resumable_sessions`.
+These fields describe attachment state, not an outage verdict; do not alert
+on a single detached snapshot alone. The upstream detached-session cap
+separately allows for normal batch polling gaps.
+
 ---
 
 ## Demo 3: Enable via Config File

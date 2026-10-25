@@ -68,7 +68,11 @@ Consumer 和 Provider 都维护对 Broker 的持续 HTTP POST 请求循环：
 
 ### 跨重连会话恢复（可选）
 
-在 Broker 上设置 `tunnel.enable_resume: true`，并在 Consumer **和** Provider 上都设置 `transport.prefer_resume: true`，会话就能在底层 HTTP/WebSocket 传输断开后存活。不开启时，任何一次传输断开——最常见的是 Cloudflare 之类 CDN/反向代理无视流量、按约一小时的「最大连接存活时间」强制掐断——都会让客户端用全新会话重连，yamux 会话连同里面的所有 SSH/SOCKS 流一起被切断。开启后，客户端改为调用 `POST /tunnel/{id}/resume`，双方重放接缝处丢失的字节，流原样继续。Broker 会把脱离传输的会话保留 `tunnel.resume_grace`（默认 30s，上限 5m）等待恢复；平时在 5s 内淘汰「poll 连接掉线」会话的快速回收器对可恢复会话放行。只有 WebSocket 或上下行都是流式的传输才能恢复，协商是「客户端请求 && Broker 支持」，因此对老版本对端开启也安全——只是静默退回今天的行为。两跳都必须可恢复：Consumer 或 Provider 任一侧未开启，那一跳断裂时流照样会死。同一 endpoint 上的 Consumer 与 Provider 对可恢复性不一致时，Broker 会记录一条警告日志，`/status` 也会按 endpoint 给出 `provider_resumable` 与 `resumable_consumer_count`，让「半可恢复」的隧道可见。设计详见 [pollmux 的 README](https://github.com/DiamondGo/pollmux)。
+在 Broker 上设置 `tunnel.enable_resume: true`，并在 Consumer **和** Provider 上都设置 `transport.prefer_resume: true`，会话就能在底层 HTTP/WebSocket 传输断开后存活。不开启时，任何一次传输断开——最常见的是 Cloudflare 之类 CDN/反向代理无视流量、按约一小时的「最大连接存活时间」强制掐断——都会让客户端用全新会话重连，yamux 会话连同里面的所有 SSH/SOCKS 流一起被切断。开启后，客户端改为调用 `POST /tunnel/{id}/resume`，双方重放接缝处丢失的字节，流原样继续。Broker 会把脱离传输的会话保留 `tunnel.resume_grace`（默认 30s，上限 5m）等待恢复；平时在 5s 内淘汰「poll 连接掉线」会话的快速回收器对可恢复会话放行。
+
+使用 pollmux v0.2.3 后，**WebSocket 和 HTTP 上下行的所有 batch／stream 组合均可恢复**，包括纯 batch，以及流式下载配合 batch 上传。涉及 batch 方向时，两端都需要支持新能力，由 pollmux 自动协商，不需要新增 HttpBroker 配置开关。老版本对端保留原有 WebSocket／双向流式恢复能力；不支持恢复的对端仍按原有方式工作。自动上传探测失败时，会重新协商 batch 上传；Broker 支持 batch 恢复时，仍保留恢复能力。对于已确认会缓冲上传的链路，可显式设置 `transport.upload_stream_preference: "batch"`，避免依赖探测；下载方向由 `transport.poll_mode` 独立选择。
+
+两跳都必须可恢复：Consumer 或 Provider 任一侧未开启，那一跳断裂时流照样会死。同一 endpoint 上的 Consumer 与 Provider 对可恢复性不一致时，Broker 会记录一条警告日志，`/status` 也会按 endpoint 给出 `provider_resumable` 与 `resumable_consumer_count`，让「半可恢复」的隧道可见。纯 batch 模式要求 `transport.poll_interval` 严格小于 `tunnel.resume_grace`。batch 吞吐仍受 RTT 限制；应按最慢支持链路设置 `tunnel.poll_buffer_size`，确保完整响应能在轮询期限内传完。恢复能力有时间边界且仅保存在进程内，Broker 重启或断线超过宽限期仍会终止会话。设计详见 [pollmux 的 README](https://github.com/DiamondGo/pollmux#resuming-the-same-session-after-transport-loss)。
 
 ### yamux 多路复用
 
@@ -663,4 +667,3 @@ ssh pi@raspberrypi
 ## 许可证
 
 详情请参阅 [LICENSE](LICENSE)。
-

@@ -45,8 +45,9 @@ tunnel:
                             # survive. This is the fix for long streams dying at the
                             # ~1h "max connection age" some CDNs/reverse proxies
                             # (observed with Cloudflare) enforce regardless of
-                            # traffic. Only WebSocket or stream mode in both
-                            # directions can be resumed. Safe against older clients:
+                            # traffic. WebSocket and all HTTP batch/stream combinations
+                            # can resume; batch directions need pollmux v0.2.3 on both
+                            # peers. Safe against older clients:
                             # they never ask, nothing changes for them. Both hops
                             # (consumer and provider) must opt in for a stream to
                             # survive either side's transport breaking.
