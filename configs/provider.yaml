@@ -51,12 +51,16 @@ transport:
                             # takes effect if the broker also has tunnel.enable_resume
                             # on; otherwise silently ignored, so it's safe to leave on
                             # against a broker that hasn't enabled it (or an older one
-                            # that doesn't know about it). Only honoured over
-                            # WebSocket or stream mode in both directions; with
-                            # upload_stream_preference on auto, a failed probe falls
-                            # back to a non-resumable session. Both the consumer and
-                            # the provider must opt in for a stream to survive either
-                            # side's transport breaking.
+                            # that doesn't know about it). Supports WebSocket and all
+                            # HTTP batch/stream combinations with pollmux v0.2.3 peers.
+                            # On auto upload probe failure, reconnects with batch
+                            # uploads and retains resume if the broker supports it.
+                            # Older brokers may only resume WebSocket/two-way streams.
+                            # For pure batch, keep poll_interval well below the
+                            # broker's resume_grace (at least a round trip plus a few
+                            # seconds of margin). Both the consumer and the provider
+                            # must opt in for a stream to survive either side's
+                            # transport breaking.
 
 logging:
   level: "info"

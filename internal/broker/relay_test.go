@@ -11,6 +11,27 @@ import (
 	"time"
 )
 
+func TestProviderDetachedLong(t *testing.T) {
+	const grace = 30 * time.Second
+	r := NewRelay(NewEndpointRegistry(), nil, grace)
+	now := time.Now()
+	for _, tc := range []struct {
+		name     string
+		detached time.Duration
+		want     bool
+	}{
+		{"between batch polls", 100 * time.Millisecond, false},
+		{"just under notice", providerDetachedNotice - time.Millisecond, false},
+		{"at notice", providerDetachedNotice, true},
+		{"waiting for resume", 20 * time.Second, true},
+	} {
+		deadline := now.Add(grace - tc.detached)
+		if got := r.providerDetachedLong(deadline, now); got != tc.want {
+			t.Errorf("%s: providerDetachedLong after %v detached = %v, want %v", tc.name, tc.detached, got, tc.want)
+		}
+	}
+}
+
 // mockConn is a minimal net.Conn whose Read is driven by an injected
 // io.Reader and whose Write captures bytes into a buffer. Once Close is
 // called, further Writes to *this* connection fail — but Reads keep

@@ -9,9 +9,12 @@
 package httpbroker_test
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"math/rand"
 	"net"
 	"net/http"
@@ -19,8 +22,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -684,11 +689,26 @@ func launchBrokerCapturing(t *testing.T, port int, sink *logSink, extraArgs ...s
 // the local stand-in for a CDN/reverse proxy cutting a connection at its
 // max connection age. The listener stays up, so the client can reconnect
 // (and, for a resumable session, resume) straight away.
+//
+// It also reads a copy of the plain HTTP it forwards, without altering a
+// byte, so a test can check which transport each hop negotiated and
+// actually used rather than inferring it from the config it asked for.
 type tcpProxy struct {
-	ln     net.Listener
-	target string
-	mu     sync.Mutex
-	conns  map[net.Conn]struct{}
+	ln       net.Listener
+	target   string
+	mu       sync.Mutex
+	conns    map[net.Conn]struct{}
+	connects []pollmux.ConnectResponse
+	traffic  map[hopTraffic]int
+	// attached counts polls and WebSockets in flight: the requests whose
+	// loss the session's transport actually notices.
+	attached atomic.Int32
+}
+
+// hopTraffic classifies one direction-carrying request seen on a hop.
+type hopTraffic struct {
+	direction string // "download" or "upload"
+	mode      string // pollmux.PollModeBatch or pollmux.PollModeStream
 }
 
 func newTCPProxy(t *testing.T, targetPort int) *tcpProxy {
@@ -698,9 +718,10 @@ func newTCPProxy(t *testing.T, targetPort int) *tcpProxy {
 		t.Fatalf("proxy listen: %v", err)
 	}
 	p := &tcpProxy{
-		ln:     ln,
-		target: fmt.Sprintf("127.0.0.1:%d", targetPort),
-		conns:  make(map[net.Conn]struct{}),
+		ln:      ln,
+		target:  fmt.Sprintf("127.0.0.1:%d", targetPort),
+		conns:   make(map[net.Conn]struct{}),
+		traffic: make(map[hopTraffic]int),
 	}
 	t.Cleanup(func() { _ = ln.Close(); p.dropAll() })
 	go p.serve()
@@ -737,10 +758,196 @@ func (p *tcpProxy) handle(client net.Conn) {
 		client.Close()
 		upstream.Close()
 	}()
+	reqR, reqW := io.Pipe()
+	respR, respW := io.Pipe()
+	go p.observe(reqR, respR)
 	done := make(chan struct{}, 2)
-	go func() { io.Copy(upstream, client); done <- struct{}{} }()
-	go func() { io.Copy(client, upstream); done <- struct{}{} }()
+	go func() { io.Copy(upstream, io.TeeReader(client, reqW)); reqW.Close(); done <- struct{}{} }()
+	go func() { io.Copy(client, io.TeeReader(upstream, respW)); respW.Close(); done <- struct{}{} }()
 	<-done
+}
+
+// observe follows the HTTP/1.1 exchanges on one proxied connection, fed a
+// copy of each direction. Requests and responses pair up in order (Go's
+// client never pipelines), and anything that stops parsing as HTTP, such
+// as a WebSocket after its 101, is drained: the tee must never stall
+// forwarding.
+func (p *tcpProxy) observe(reqs, resps io.Reader) {
+	var attached atomic.Int32 // this connection's share of p.attached
+	pending := make(chan *http.Request, 16)
+	stop := make(chan struct{})
+	reqsDone := make(chan struct{})
+	go func() {
+		defer close(reqsDone)
+		defer io.Copy(io.Discard, reqs)
+		defer close(pending)
+		br := bufio.NewReader(reqs)
+		for {
+			req, err := http.ReadRequest(br)
+			if err != nil {
+				return
+			}
+			p.noteRequest(req, &attached)
+			select {
+			case pending <- req:
+			case <-stop:
+				return
+			}
+			_, _ = io.Copy(io.Discard, req.Body)
+		}
+	}()
+
+	br := bufio.NewReader(resps)
+	for req := range pending {
+		resp, err := http.ReadResponse(br, req)
+		if err != nil {
+			break
+		}
+		p.noteResponse(req, resp, &attached)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if isPollRequest(req) {
+			attached.Add(-1)
+			p.attached.Add(-1)
+		}
+		if resp.StatusCode == http.StatusSwitchingProtocols {
+			break
+		}
+	}
+	close(stop)
+	_, _ = io.Copy(io.Discard, resps)
+	<-reqsDone
+	p.attached.Add(-attached.Load())
+}
+
+func isPollRequest(req *http.Request) bool {
+	return req.Header.Get(pollmux.HeaderReceiveOnly) == "true"
+}
+
+func (p *tcpProxy) noteRequest(req *http.Request, attached *atomic.Int32) {
+	h := req.Header
+	switch {
+	case h.Get(pollmux.HeaderSendStreamProbe) == "true":
+	case h.Get(pollmux.HeaderSendStream) == "true":
+		p.count(hopTraffic{"upload", pollmux.PollModeStream})
+	case h.Get(pollmux.HeaderSendOnly) == "true":
+		p.count(hopTraffic{"upload", pollmux.PollModeBatch})
+	case isPollRequest(req):
+		attached.Add(1)
+		p.attached.Add(1)
+	}
+}
+
+func (p *tcpProxy) noteResponse(req *http.Request, resp *http.Response, attached *atomic.Int32) {
+	switch {
+	case resp.StatusCode == http.StatusSwitchingProtocols:
+		attached.Add(1)
+		p.attached.Add(1)
+	case resp.StatusCode/100 != 2:
+	case strings.HasSuffix(req.URL.Path, "/connect"):
+		var cr pollmux.ConnectResponse
+		if json.NewDecoder(resp.Body).Decode(&cr) == nil {
+			p.mu.Lock()
+			p.connects = append(p.connects, cr)
+			p.mu.Unlock()
+		}
+	case isPollRequest(req):
+		// A stream poll flushes its headers at once and leaves the body
+		// open, so it has no length; a batch answer is always sized.
+		mode := pollmux.PollModeBatch
+		if resp.ContentLength < 0 {
+			mode = pollmux.PollModeStream
+		}
+		p.count(hopTraffic{"download", mode})
+	}
+}
+
+func (p *tcpProxy) count(k hopTraffic) {
+	p.mu.Lock()
+	p.traffic[k]++
+	p.mu.Unlock()
+}
+
+// hopModes is what a client hop must negotiate and then use. An empty
+// transport means plain HTTP; download/upload are empty for WebSocket.
+type hopModes struct {
+	transport, download, upload string
+}
+
+var (
+	wantWebSocket = hopModes{transport: pollmux.TransportWebSocket}
+	wantStream    = hopModes{download: pollmux.PollModeStream, upload: pollmux.PollModeStream}
+)
+
+// assertNegotiated checks the hop's single /connect answer. It waits a
+// little because the client may act on the response before the observer
+// has finished decoding its copy.
+func (p *tcpProxy) assertNegotiated(t *testing.T, label, hop string, want hopModes) {
+	t.Helper()
+	var connects []pollmux.ConnectResponse
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		p.mu.Lock()
+		connects = slices.Clone(p.connects)
+		p.mu.Unlock()
+		if len(connects) > 0 || time.Now().After(deadline) {
+			break
+		}
+	}
+	if len(connects) != 1 {
+		t.Fatalf("[%s] expected exactly one /connect on the %s hop, saw %d", label, hop, len(connects))
+	}
+	cr := connects[0]
+	got := hopModes{transport: cr.Transport}
+	if cr.Transport == "" {
+		got.download, got.upload = pollmux.PollModeBatch, pollmux.PollModeBatch
+		if cr.PollMode == pollmux.PollModeStream {
+			got.download = pollmux.PollModeStream
+		}
+		if cr.UploadStreamMode == pollmux.PollModeStream {
+			got.upload = pollmux.PollModeStream
+		}
+	}
+	if got != want || !cr.Resumable {
+		t.Fatalf("[%s] %s hop negotiated %+v resumable=%v, want %+v resumable=true",
+			label, hop, got, cr.Resumable, want)
+	}
+	if (want.download == pollmux.PollModeBatch || want.upload == pollmux.PollModeBatch) && !cr.BatchResume {
+		t.Fatalf("[%s] %s hop negotiated a batch direction without batch_resume", label, hop)
+	}
+}
+
+// assertTraffic checks that every download and upload request the hop
+// carried used the wanted mode, and that each wanted mode was exercised.
+// A WebSocket hop must carry no HTTP direction requests at all.
+func (p *tcpProxy) assertTraffic(t *testing.T, label, hop string, want hopModes) {
+	t.Helper()
+	p.mu.Lock()
+	traffic := maps.Clone(p.traffic)
+	p.mu.Unlock()
+	for _, dir := range []struct{ name, want string }{{"download", want.download}, {"upload", want.upload}} {
+		for _, mode := range []string{pollmux.PollModeBatch, pollmux.PollModeStream} {
+			n := traffic[hopTraffic{dir.name, mode}]
+			if mode == dir.want && n == 0 {
+				t.Fatalf("[%s] %s hop carried no %s %s requests", label, hop, mode, dir.name)
+			}
+			if mode != dir.want && n != 0 {
+				t.Fatalf("[%s] %s hop carried %d unexpected %s %s request(s)", label, hop, n, mode, dir.name)
+			}
+		}
+	}
+}
+
+// sever cuts every connection on the hop once something the session
+// would miss is in flight: a poll or a WebSocket. Between two batch polls
+// only idle keep-alive connections remain, and cutting those changes
+// nothing, since net/http just dials a fresh one for the next poll.
+func (p *tcpProxy) sever(t *testing.T, label, hop string, timeout time.Duration) int {
+	t.Helper()
+	for deadline := time.Now().Add(timeout); p.attached.Load() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("[%s] no poll or WebSocket in flight on the %s hop within %v", label, hop, timeout)
+		}
+	}
+	return p.dropAll()
 }
 
 // dropAll severs every connection currently flowing through the proxy.
@@ -843,7 +1050,8 @@ func resumedLine(sessionID string) string {
 // proves the session actually resumes rather than merely reconnects:
 //
 //  1. the broker's connect log must report resumable:true for both the
-//     consumer and the provider session;
+//     consumer and the provider session, and each hop's /connect answer
+//     must carry exactly the wanted transport and directions;
 //  2. a tunnelled TCP stream (SOCKS5 → provider → local echo server) is
 //     opened and exercised; WebSocket regression coverage then leaves it idle
 //     for a full heartbeat so no pending data/ACK can help the old attachment
@@ -853,10 +1061,11 @@ func resumedLine(sessionID string) string {
 //     and the *same* stream must still echo;
 //  4. the broker must never have created more than the original two
 //     sessions — a client falling back to today's reconnect path would
-//     show up as a third.
+//     show up as a third — and every download/upload request either hop
+//     carried must have used the wanted mode.
 //
-// Both transports pollmux can resume are covered by the two tests below.
-func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport string, idleBeforeDrop bool) {
+// WebSocket and every HTTP batch/stream combination are covered below.
+func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport string, want hopModes, idleBeforeDrop bool) {
 	t.Helper()
 	buildBinaries(t)
 
@@ -918,6 +1127,14 @@ func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport 
 	defer conn.Close()
 	echoRoundTrip(t, conn, "before any drop\n", 10*time.Second)
 
+	hops := []struct {
+		name  string
+		proxy *tcpProxy
+	}{{"consumer", consumerHop}, {"provider", providerHop}}
+	for _, hop := range hops {
+		hop.proxy.assertNegotiated(t, label, hop.name, want)
+	}
+
 	if idleBeforeDrop {
 		// pollmux v0.2.1 could not detach an idle server-side WebSocket writer:
 		// /resume kept receiving 503 until resume_grace expired. Waiting past
@@ -931,19 +1148,13 @@ func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport 
 
 	// 3. Cut each hop in turn; the session on that hop must resume (not
 	//    reconnect) and the stream must survive both cuts.
-	for _, hop := range []struct {
-		name  string
-		proxy *tcpProxy
-	}{{"consumer", consumerHop}, {"provider", providerHop}} {
+	for _, hop := range hops {
 		sessionID := sessionIDForRole(t, sink, hop.name)
 		if sink.count(resumedLine(sessionID)) != 0 {
 			t.Fatalf("[%s] %s session resumed before its hop was cut", label, hop.name)
 		}
-		n := hop.proxy.dropAll()
+		n := hop.proxy.sever(t, label, hop.name, 10*time.Second)
 		t.Logf("[%s] severed %d connection(s) on the %s hop", label, n, hop.name)
-		if n == 0 {
-			t.Fatalf("[%s] no live connections on the %s hop to sever", label, hop.name)
-		}
 		waitForLogCount(t, sink, resumedLine(sessionID), 1, 20*time.Second)
 		echoRoundTrip(t, conn, fmt.Sprintf("after %s drop\n", hop.name), 20*time.Second)
 	}
@@ -956,17 +1167,22 @@ func runResumableIntegration(t *testing.T, label, brokerTunnel, clientTransport 
 
 	// The ordinary path still works on top of the resumed sessions.
 	assertConnectivity(t, newSOCKS5Client(t, socks5Port), label)
+
+	for _, hop := range hops {
+		hop.proxy.assertTraffic(t, label, hop.name, want)
+	}
 }
 
 // TestIntegration_ResumableStream: resume negotiated over stream mode in
 // both directions. upload_stream_preference is forced to "stream" so the
-// connect-time probe is skipped — with it on auto, a probe failure would
-// silently fall back to a non-resumable session, which the resumable:true
-// assertion would then catch rather than the test passing by accident.
+// connect-time probe is skipped — with it on auto, pollmux v0.2.3 could
+// fall back to resumable batch uploads, passing the resume assertions
+// without exercising the intended two-way-stream transport.
 func TestIntegration_ResumableStream(t *testing.T) {
 	runResumableIntegration(t, "ResumableStream",
 		"  enable_resume: true\n  resume_grace: \"30s\"\n",
-		"  poll_mode: \"stream\"\n  upload_stream_preference: \"stream\"\n  prefer_resume: true\n", false)
+		"  poll_mode: \"stream\"\n  upload_stream_preference: \"stream\"\n  prefer_resume: true\n",
+		wantStream, false)
 }
 
 // TestIntegration_ResumableWebSocket: resume negotiated over the WebSocket
@@ -974,5 +1190,30 @@ func TestIntegration_ResumableStream(t *testing.T) {
 func TestIntegration_ResumableWebSocket(t *testing.T) {
 	runResumableIntegration(t, "ResumableWebSocket",
 		"  enable_websocket: true\n  enable_resume: true\n  resume_grace: \"30s\"\n",
-		"  prefer_websocket: true\n  prefer_resume: true\n", true)
+		"  prefer_websocket: true\n  prefer_resume: true\n", wantWebSocket, true)
+}
+
+// TestIntegration_ResumableHTTPBatchDirections covers pollmux v0.2.3's
+// numbered batch protocol through real broker/provider/consumer binaries.
+// Each case must keep the same SOCKS stream and the original two sessions
+// alive after transport loss on both hops, not just reconnect successfully.
+func TestIntegration_ResumableHTTPBatchDirections(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		brokerPollMode   string
+		clientPollMode   string
+		uploadPreference string
+		want             hopModes
+	}{
+		{"Batch", "batch", "batch", "batch", hopModes{download: "batch", upload: "batch"}},
+		{"StreamDownloadBatchUpload", "stream", "stream", "batch", hopModes{download: "stream", upload: "batch"}},
+		{"BatchDownloadStreamUpload", "stream", "batch", "stream", hopModes{download: "batch", upload: "stream"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runResumableIntegration(t, "Resumable"+tc.name,
+				fmt.Sprintf("  poll_mode: %q\n  enable_resume: true\n  resume_grace: \"30s\"\n", tc.brokerPollMode),
+				fmt.Sprintf("  poll_mode: %q\n  upload_stream_preference: %q\n  prefer_resume: true\n",
+					tc.clientPollMode, tc.uploadPreference), tc.want, false)
+		})
+	}
 }

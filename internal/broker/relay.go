@@ -10,18 +10,37 @@ import (
 	"go.uber.org/zap"
 )
 
+// providerDetachedNotice is how long a resumable provider must have had no
+// transport attached before a new stream towards it is logged at Info as
+// stalled. A healthy pure-batch provider has nothing attached for a round
+// trip after every poll, plus its poll_interval after an idle one, so this
+// must stay well above that gap; a provider whose poll_interval approaches
+// it can still trip the Info line after idle polls.
+const providerDetachedNotice = 5 * time.Second
+
 // Relay manages yamux sessions and bridges streams between consumers and providers.
 type Relay struct {
 	registry *EndpointRegistry
 	logger   *zap.Logger
+	// resumeGrace is the effective grace pollmux gives every resumable
+	// session, so a resume deadline can be turned back into time detached.
+	resumeGrace time.Duration
 }
 
 // NewRelay creates a new Relay with the given registry and logger.
-func NewRelay(registry *EndpointRegistry, logger *zap.Logger) *Relay {
+// resumeGrace must be the effective ServerConfig.ResumeGrace, default applied.
+func NewRelay(registry *EndpointRegistry, logger *zap.Logger, resumeGrace time.Duration) *Relay {
 	return &Relay{
-		registry: registry,
-		logger:   logger,
+		registry:    registry,
+		logger:      logger,
+		resumeGrace: resumeGrace,
 	}
+}
+
+// providerDetachedLong reports whether a provider whose resume grace ends at
+// deadline has been detached for at least providerDetachedNotice by now.
+func (r *Relay) providerDetachedLong(deadline, now time.Time) bool {
+	return r.resumeGrace-deadline.Sub(now) >= providerDetachedNotice
 }
 
 // HandleProvider sets up yamux on the provider session and registers it.
@@ -214,11 +233,16 @@ func (r *Relay) bridgeStream(
 	// is deliberate (a blip must not fail requests outright), but it means a
 	// new request can wait up to ResumeGrace, so leave a trace of it.
 	if deadline, detached := r.registry.ProviderResumeDeadline(endpointName); detached {
-		r.logger.Info("provider transport is detached; stream will stall until it resumes",
+		fields := []zap.Field{
 			zap.String("endpoint", endpointName),
 			zap.String("target", targetAddr),
 			zap.Duration("resume_grace_left", time.Until(deadline)),
-		)
+		}
+		if r.providerDetachedLong(deadline, time.Now()) {
+			r.logger.Info("provider transport is detached; stream will stall until it resumes", fields...)
+		} else {
+			r.logger.Debug("provider has no transport attached; stream waits for its next poll or resume", fields...)
+		}
 	}
 	providerStream, err := providerYamux.Open()
 	if err != nil {
