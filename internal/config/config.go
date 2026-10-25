@@ -136,7 +136,9 @@ type Socks5Config struct {
 // TransportConfig holds transport timing settings.
 type TransportConfig struct {
 	// PollInterval pauses after an idle batch poll. For a resumable pure-batch
-	// session it must be strictly below the negotiated resume grace.
+	// session it must stay well below the negotiated resume grace, leaving at
+	// least a round trip plus a few seconds: pollmux rejects only a value that
+	// reaches the grace, yet each idle gap lasts PollInterval plus a round trip.
 	PollInterval time.Duration `mapstructure:"poll_interval"`
 	RetryBackoff time.Duration `mapstructure:"retry_backoff"`
 	// CoalesceWindow bounds how long pollmux.Connector's Write() waits before

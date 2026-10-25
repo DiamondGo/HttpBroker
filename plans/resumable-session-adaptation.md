@@ -22,7 +22,7 @@
 > batch 能力由两端自动协商，老版本对端保留原有行为。自动上传探测失败后可回退到 batch 上传，
 > 在 Broker 支持新能力时继续保留恢复能力。HttpBroker 的中继和 fast reaper 无需改动。
 > `TestIntegration_ResumableHTTPBatchDirections` 覆盖三种新增组合，逐一切断两跳并验证原流和会话存活。
-> 纯 batch 的 `poll_interval` 必须小于 `resume_grace`；正常轮询间隙也可能被 `/status` 显示为 detached，
+> 纯 batch 的 `poll_interval` 应远小于 `resume_grace`（至少留出一次往返加几秒；pollmux 只拒绝达到宽限期的值）；正常轮询间隙也可能被 `/status` 显示为 detached，
 > 不能单凭一次 detached 快照判断断线。以下章节保留原始适配设计。
 
 ## 1. 背景（为什么要做这件事）

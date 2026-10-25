@@ -55,10 +55,11 @@ transport:
                             # On auto upload probe failure, reconnects with batch
                             # uploads and retains resume if the broker supports it.
                             # Older brokers may only resume WebSocket/two-way streams.
-                            # For pure batch, poll_interval must be below resume_grace.
-                            # Both the consumer and
-                            # the provider must opt in for a stream to survive either
-                            # side's transport breaking.
+                            # For pure batch, keep poll_interval well below the
+                            # broker's resume_grace (at least a round trip plus a few
+                            # seconds of margin). Both the consumer and the provider
+                            # must opt in for a stream to survive either side's
+                            # transport breaking.
 
 logging:
   level: "info"

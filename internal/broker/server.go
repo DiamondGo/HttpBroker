@@ -192,7 +192,11 @@ func resolvePollMode(configured string) string {
 // NewServer creates a new broker Server.
 func NewServer(config Config, logger *zap.Logger) *Server {
 	registry := NewEndpointRegistry()
-	relay := NewRelay(registry, logger)
+	resumeGrace := config.ResumeGrace
+	if resumeGrace <= 0 {
+		resumeGrace = pollmux.DefaultResumeGrace
+	}
+	relay := NewRelay(registry, logger, resumeGrace)
 	store := pollmux.NewSessionStore()
 	slogger := slog.New(zapslog.NewHandler(logger.Core()))
 

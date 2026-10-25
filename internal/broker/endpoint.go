@@ -418,7 +418,8 @@ func warnIfHalfResumable(logger *zap.Logger, joined *brokerSession, peers []*bro
 // /resume — and, if so, when that grace runs out. A provider in this state
 // stays registered on purpose (see brokenPollGrace in server.go): streams
 // opened towards it stall until it resumes, and fail only if the grace
-// expires and pollmux retires the session.
+// expires and pollmux retires the session. A healthy resumable pure-batch
+// provider also reports detached for the brief gap between two polls.
 func (r *EndpointRegistry) ProviderResumeDeadline(endpointName string) (time.Time, bool) {
 	r.mu.RLock()
 	ep, ok := r.endpoints[endpointName]
